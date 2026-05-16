@@ -1,0 +1,372 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 3,
+    "identityHash": "0311a80c93846a8b858e6adf617880a6",
+    "entities": [
+      {
+        "tableName": "entries",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER NOT NULL, `isCommon` INTEGER NOT NULL, `jlptLevel` TEXT, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isCommon",
+            "columnName": "isCommon",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "jlptLevel",
+            "columnName": "jlptLevel",
+            "affinity": "TEXT",
+            "notNull": false
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "kanji",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`rowId` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `entryId` INTEGER NOT NULL, `text` TEXT NOT NULL, `info` TEXT, `priority` TEXT, FOREIGN KEY(`entryId`) REFERENCES `entries`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "rowId",
+            "columnName": "rowId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "entryId",
+            "columnName": "entryId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "text",
+            "columnName": "text",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "info",
+            "columnName": "info",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "priority",
+            "columnName": "priority",
+            "affinity": "TEXT",
+            "notNull": false
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "rowId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_kanji_entryId",
+            "unique": false,
+            "columnNames": [
+              "entryId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_kanji_entryId` ON `${TABLE_NAME}` (`entryId`)"
+          },
+          {
+            "name": "index_kanji_text",
+            "unique": false,
+            "columnNames": [
+              "text"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_kanji_text` ON `${TABLE_NAME}` (`text`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "entries",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "entryId"
+            ],
+            "referencedColumns": [
+              "id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "readings",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`rowId` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `entryId` INTEGER NOT NULL, `text` TEXT NOT NULL, `info` TEXT, `priority` TEXT, `noKanji` INTEGER NOT NULL, FOREIGN KEY(`entryId`) REFERENCES `entries`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "rowId",
+            "columnName": "rowId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "entryId",
+            "columnName": "entryId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "text",
+            "columnName": "text",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "info",
+            "columnName": "info",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "priority",
+            "columnName": "priority",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "noKanji",
+            "columnName": "noKanji",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "rowId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_readings_entryId",
+            "unique": false,
+            "columnNames": [
+              "entryId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_readings_entryId` ON `${TABLE_NAME}` (`entryId`)"
+          },
+          {
+            "name": "index_readings_text",
+            "unique": false,
+            "columnNames": [
+              "text"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_readings_text` ON `${TABLE_NAME}` (`text`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "entries",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "entryId"
+            ],
+            "referencedColumns": [
+              "id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "senses",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`senseId` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `entryId` INTEGER NOT NULL, `orderIndex` INTEGER NOT NULL, `partOfSpeech` TEXT NOT NULL, `misc` TEXT, `field` TEXT, `dialect` TEXT, FOREIGN KEY(`entryId`) REFERENCES `entries`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "senseId",
+            "columnName": "senseId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "entryId",
+            "columnName": "entryId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "orderIndex",
+            "columnName": "orderIndex",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "partOfSpeech",
+            "columnName": "partOfSpeech",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "misc",
+            "columnName": "misc",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "field",
+            "columnName": "field",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "dialect",
+            "columnName": "dialect",
+            "affinity": "TEXT",
+            "notNull": false
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "senseId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_senses_entryId",
+            "unique": false,
+            "columnNames": [
+              "entryId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_senses_entryId` ON `${TABLE_NAME}` (`entryId`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "entries",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "entryId"
+            ],
+            "referencedColumns": [
+              "id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "glosses",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`rowId` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `senseId` INTEGER NOT NULL, `text` TEXT NOT NULL, `language` TEXT NOT NULL, FOREIGN KEY(`senseId`) REFERENCES `senses`(`senseId`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "rowId",
+            "columnName": "rowId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "senseId",
+            "columnName": "senseId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "text",
+            "columnName": "text",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "language",
+            "columnName": "language",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "rowId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_glosses_senseId",
+            "unique": false,
+            "columnNames": [
+              "senseId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_glosses_senseId` ON `${TABLE_NAME}` (`senseId`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "senses",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "senseId"
+            ],
+            "referencedColumns": [
+              "senseId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "kanji_dic",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`character` TEXT NOT NULL, `meanings` TEXT NOT NULL, `readings` TEXT NOT NULL, PRIMARY KEY(`character`))",
+        "fields": [
+          {
+            "fieldPath": "character",
+            "columnName": "character",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "meanings",
+            "columnName": "meanings",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "readings",
+            "columnName": "readings",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "character"
+          ]
+        },
+        "indices": [],
+        "foreignKeys": []
+      }
+    ],
+    "views": [],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '0311a80c93846a8b858e6adf617880a6')"
+    ]
+  }
+}
