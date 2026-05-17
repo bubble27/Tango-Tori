@@ -3,39 +3,36 @@ package com.tangotori.app.domain.util
 import com.tangotori.app.domain.models.Token.Companion.isKanji
 
 /**
- * Generates the kanji-breakdown section for the back of an Anki card.
- *
- * Input is the AnkiDroid furigana markup that [FuriganaBuilder] produces
- * (e.g. `仲間[なかま]` for a fused compound, or `食[た]べる` for kanji+okurigana).
- * Each ideograph yields a tile that renders in the card template as:
- *
- *   <div class="kanji-tile">
- *     <div class="kanji-reading">なか</div>   ← reading on top
- *     <div class="kanji-char">仲</div>        ← kanji below
- *     <div class="kanji-meaning">relation</div>
- *   </div>
- *
- * When the markup lumps multiple kanji under one bracketed reading (FuriganaBuilder
- * can't always split compounds), we use the per-kanji readings supplied by
- * [kanjiReadings] to align the compound reading against each kanji and emit
- * per-tile readings. If no alignment is possible (rendaku, gemination, etc.),
- * we fall back to attaching the whole reading to the first kanji.
- *
- * Pure-kana words produce an empty string — the template's `{{#KanjiBreakdown}}`
- * mustache guard then collapses the section.
+ * Per-kanji tile data: ideograph + the slice of the compound reading that maps
+ * to it + up to N English meanings. Consumed by the Anki HTML builder and by
+ * the in-app dictionary's kanji section, so both views share the exact same
+ * splitting/alignment logic.
  */
-object KanjiBreakdownHtmlBuilder {
+data class KanjiTile(
+    val char: String,
+    val reading: String,
+    val meanings: List<String>,
+)
+
+/**
+ * Splits a furigana-markup string into structured [KanjiTile]s — one per
+ * ideograph. The compound reading is split across kanji via the same
+ * backtracking + rendaku/gemination logic that the HTML builder used to do
+ * inline; both views call this so they stay in sync.
+ */
+object KanjiBreakdownBuilder {
 
     fun build(
         furiganaMarkup: String,
         kanjiMeanings: (String) -> List<String>,
         kanjiReadings: (String) -> Set<String> = { emptySet() },
         maxMeaningsPerChar: Int = 3,
-    ): String {
-        if (furiganaMarkup.isEmpty()) return ""
-        if (!furiganaMarkup.any { it.isKanji() }) return ""
+    ): List<KanjiTile> {
+        if (furiganaMarkup.isEmpty()) return emptyList()
+        if (!furiganaMarkup.any { it.isKanji() }) return emptyList()
 
-        val tiles = mutableListOf<Tile>()
+        data class RawTile(val char: String, val reading: String)
+        val raw = mutableListOf<RawTile>()
         var i = 0
         while (i < furiganaMarkup.length) {
             val openBracket = furiganaMarkup.indexOf('[', startIndex = i)
@@ -52,67 +49,41 @@ object KanjiBreakdownHtmlBuilder {
             val closeBracket = furiganaMarkup.indexOf(']', startIndex = openBracket + 1)
             if (closeBracket < 0) break
             val reading = furiganaMarkup.substring(openBracket + 1, closeBracket)
-            tiles += explode(kanjiRun, reading, kanjiReadings)
+            raw += explode(kanjiRun, reading, kanjiReadings).map { RawTile(it.char, it.reading) }
             i = closeBracket + 1
         }
-        if (tiles.isEmpty()) return ""
 
-        val sb = StringBuilder()
-        for (t in tiles) {
-            val meanings = kanjiMeanings(t.char)
-                .take(maxMeaningsPerChar)
-                .joinToString(", ")
-                .htmlEscape()
-            sb.append("<div class=\"kanji-tile\">")
-                .append("<div class=\"kanji-reading\">").append(t.reading.htmlEscape()).append("</div>")
-                .append("<div class=\"kanji-char\">").append(t.char.htmlEscape()).append("</div>")
-            if (meanings.isNotEmpty()) {
-                sb.append("<div class=\"kanji-meaning\">").append(meanings).append("</div>")
-            }
-            sb.append("</div>")
+        return raw.map { t ->
+            KanjiTile(
+                char = t.char,
+                reading = t.reading,
+                meanings = kanjiMeanings(t.char).take(maxMeaningsPerChar),
+            )
         }
-        return sb.toString()
     }
 
-    private data class Tile(val char: String, val reading: String)
+    private data class Pair(val char: String, val reading: String)
 
     private fun explode(
         kanjiRun: String,
         reading: String,
         kanjiReadings: (String) -> Set<String>,
-    ): List<Tile> {
-        if (kanjiRun.length == 1) return listOf(Tile(kanjiRun, reading))
+    ): List<Pair> {
+        if (kanjiRun.length == 1) return listOf(Pair(kanjiRun, reading))
         val split = splitReadingAcrossKanji(kanjiRun, reading, kanjiReadings)
         if (split != null) {
-            return kanjiRun.mapIndexed { idx, c -> Tile(c.toString(), split[idx]) }
+            return kanjiRun.mapIndexed { idx, c -> Pair(c.toString(), split[idx]) }
         }
-        // Fallback: attach the whole reading to the first kanji, leave the
-        // rest blank. Matches the v1 behavior; rare with KANJIDIC readings
-        // available.
         return kanjiRun.mapIndexed { idx, c ->
-            Tile(c.toString(), if (idx == 0) reading else "")
+            Pair(c.toString(), if (idx == 0) reading else "")
         }
     }
 
     /**
      * Try every combination of per-kanji readings that exactly tiles the
-     * compound reading. Backtracking — exits on first match. The match pool
-     * for each kanji is enriched with two compound-junction sound changes:
-     *
-     *   - **Rendaku** (sequential voicing): non-initial kanji's first mora's
-     *     unvoiced consonant becomes voiced — か→が, さ→ざ, は→ば/ぱ, etc.
-     *   - **Gemination** (sokuon): non-final kanji's last mora becomes っ —
-     *     がく + こう → がっこう (学校).
-     *
-     * We pair each candidate `(matchForm, displayForm)`. The match form is
-     * what we try to align against the compound reading; the display form is
-     * the original/base kanjidic reading we want to show on the card. So for
-     * 学校 we match `がっ` against the reading slice but output `がく`,
-     * matching the user's intent that tiles show the regular per-kanji
-     * reading rather than its phonetic compound variant.
-     *
-     * Returns null if no alignment consumes the entire compound reading —
-     * caller falls back to whole-reading-on-first.
+     * compound reading. Backtracking — exits on first match. Pool for each
+     * kanji includes rendaku/gemination variants, paired with the BASE
+     * display form so the tile shows the regular reading.
      */
     private fun splitReadingAcrossKanji(
         kanjiRun: String,
@@ -127,10 +98,7 @@ object KanjiBreakdownHtmlBuilder {
             val base = kanjiReadings(char).filter { it.isNotEmpty() }
             val isFirst = kIdx == 0
             val isLast = kIdx == kanjiRun.length - 1
-            // (matchForm, displayForm) pairs. Base readings have match = display;
-            // rendaku/gemination variants pair the variant with the original
-            // base form so the card shows the regular reading.
-            val candidates = LinkedHashMap<String, String>() // match → display
+            val candidates = LinkedHashMap<String, String>()
             for (b in base) candidates.putIfAbsent(b, b)
             if (!isFirst) for (b in base) {
                 for (v in rendakuVariants(b)) candidates.putIfAbsent(v, b)
@@ -138,7 +106,6 @@ object KanjiBreakdownHtmlBuilder {
             if (!isLast) for (b in base) {
                 geminationVariant(b)?.let { v -> candidates.putIfAbsent(v, b) }
             }
-            // Prefer longer matches — disambiguates overlapping readings.
             val sorted = candidates.entries.sortedByDescending { it.key.length }
             for ((matchForm, displayForm) in sorted) {
                 if (matchForm.isEmpty()) continue
@@ -154,11 +121,6 @@ object KanjiBreakdownHtmlBuilder {
         return recurse(0, 0, mutableListOf())
     }
 
-    /**
-     * Returns the rendaku-voiced forms of [reading] (the first mora's
-     * unvoiced consonant becomes voiced). Most consonants have one voiced
-     * counterpart; the h-row has two (b- and p-).
-     */
     private fun rendakuVariants(reading: String): List<String> {
         if (reading.isEmpty()) return emptyList()
         val voiced = RendakuMap[reading[0]] ?: return emptyList()
@@ -166,10 +128,6 @@ object KanjiBreakdownHtmlBuilder {
         return voiced.map { v -> "$v$tail" }
     }
 
-    /**
-     * Returns the geminated form (last mora → っ) when the last mora is one
-     * of the "sokuon-prone" morae — く, き, ち, つ, ふ. Null otherwise.
-     */
     private fun geminationVariant(reading: String): String? {
         if (reading.length < 2) return null
         val last = reading.last()
@@ -178,17 +136,12 @@ object KanjiBreakdownHtmlBuilder {
     }
 
     private val RendakuMap: Map<Char, List<Char>> = mapOf(
-        // k → g
         'か' to listOf('が'), 'き' to listOf('ぎ'), 'く' to listOf('ぐ'),
         'け' to listOf('げ'), 'こ' to listOf('ご'),
-        // s → z (し→じ uses Japanese phonology, written ぢ vs じ; we use じ).
         'さ' to listOf('ざ'), 'し' to listOf('じ'), 'す' to listOf('ず'),
         'せ' to listOf('ぜ'), 'そ' to listOf('ぞ'),
-        // t → d (ち→ぢ, つ→づ are historical/yotsugana — produced occasionally).
         'た' to listOf('だ'), 'ち' to listOf('ぢ', 'じ'), 'つ' to listOf('づ', 'ず'),
         'て' to listOf('で'), 'と' to listOf('ど'),
-        // h → b or p (both occur — はち+ひゃく → はっぴゃく has p-,
-        // 山 + 花 → 山花 やまばな has b-).
         'は' to listOf('ば', 'ぱ'),
         'ひ' to listOf('び', 'ぴ'),
         'ふ' to listOf('ぶ', 'ぷ'),
@@ -197,4 +150,39 @@ object KanjiBreakdownHtmlBuilder {
     )
 
     private val GeminationLastMora: Set<Char> = setOf('く', 'き', 'ち', 'つ', 'ふ')
+}
+
+/**
+ * Generates the kanji-breakdown HTML for the back of an Anki card. Delegates
+ * tile construction to [KanjiBreakdownBuilder] so the dictionary view (Compose)
+ * and the Anki card (HTML) always render identical splits.
+ */
+object KanjiBreakdownHtmlBuilder {
+
+    fun build(
+        furiganaMarkup: String,
+        kanjiMeanings: (String) -> List<String>,
+        kanjiReadings: (String) -> Set<String> = { emptySet() },
+        maxMeaningsPerChar: Int = 3,
+    ): String {
+        val tiles = KanjiBreakdownBuilder.build(
+            furiganaMarkup = furiganaMarkup,
+            kanjiMeanings = kanjiMeanings,
+            kanjiReadings = kanjiReadings,
+            maxMeaningsPerChar = maxMeaningsPerChar,
+        )
+        if (tiles.isEmpty()) return ""
+        val sb = StringBuilder()
+        for (t in tiles) {
+            val meaningText = t.meanings.joinToString(", ").htmlEscape()
+            sb.append("<div class=\"kanji-tile\">")
+                .append("<div class=\"kanji-reading\">").append(t.reading.htmlEscape()).append("</div>")
+                .append("<div class=\"kanji-char\">").append(t.char.htmlEscape()).append("</div>")
+            if (meaningText.isNotEmpty()) {
+                sb.append("<div class=\"kanji-meaning\">").append(meaningText).append("</div>")
+            }
+            sb.append("</div>")
+        }
+        return sb.toString()
+    }
 }

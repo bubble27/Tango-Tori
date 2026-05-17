@@ -6,8 +6,10 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -16,9 +18,11 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -41,9 +45,13 @@ import com.tangotori.app.domain.models.Token
 import com.tangotori.app.domain.util.JmdictDialectLabels
 import com.tangotori.app.domain.util.JmdictFieldLabels
 import com.tangotori.app.domain.util.JmdictMiscLabels
+import com.tangotori.app.domain.util.KanjiTile
 import com.tangotori.app.domain.util.formatCodes
 import com.tangotori.app.domain.util.formatPos
 import com.tangotori.app.ui.theme.toColor
+import androidx.compose.runtime.produceState
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 
 /**
  * Rich expanded entry view shown beneath a tapped word in the list.
@@ -60,15 +68,21 @@ fun ExpandedEntryCard(
     isSubmitting: Boolean,
     onAddToDefaultDeck: (Token, DictEntry) -> Unit,
     onChooseDeck: (Token, DictEntry) -> Unit,
+    /** Fetcher for per-kanji tiles (char + reading + meanings) shown in the
+     *  in-app dictionary's kanji section. Called from a [produceState] keyed
+     *  by entry id so flipping tabs re-fetches. */
+    loadKanjiBreakdown: suspend (DictEntry) -> List<KanjiTile>,
     modifier: Modifier = Modifier,
 ) {
+    // Top padding gives the senses block air below the red header bar; the
+    // bar's bottom edge would otherwise sit flush against the first POS line.
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 12.dp),
+            .padding(start = 16.dp, end = 16.dp, top = 20.dp, bottom = 14.dp),
     ) {
         when {
-            lookup == null || lookup.loading -> LoadingRow()
+            lookup == null -> { /* should not be reached when caller gates */ }
             lookup.error != null -> ErrorRow(lookup.error)
             lookup.entries.isNullOrEmpty() -> EmptyRow()
             else -> EntryBody(
@@ -78,21 +92,9 @@ fun ExpandedEntryCard(
                 isSubmitting = isSubmitting,
                 onAddToDefaultDeck = onAddToDefaultDeck,
                 onChooseDeck = onChooseDeck,
+                loadKanjiBreakdown = loadKanjiBreakdown,
             )
         }
-    }
-}
-
-@Composable
-private fun LoadingRow() {
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(16.dp))
-        Spacer(Modifier.width(8.dp))
-        Text(
-            "Looking up…",
-            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
-            fontSize = 13.sp,
-        )
     }
 }
 
@@ -123,6 +125,7 @@ private fun EntryBody(
     isSubmitting: Boolean,
     onAddToDefaultDeck: (Token, DictEntry) -> Unit,
     onChooseDeck: (Token, DictEntry) -> Unit,
+    loadKanjiBreakdown: suspend (DictEntry) -> List<KanjiTile>,
 ) {
     // Multi-entry: tab strip. Preserve selection across recompositions but reset
     // when the entry list itself changes (different token, different entries).
@@ -137,47 +140,70 @@ private fun EntryBody(
     }
 
     val entry = entries[selectedIdx.coerceIn(0, entries.lastIndex)]
-    EntryDetail(token = token, entry = entry)
+    EntryDetail(token = token, entry = entry, loadKanjiBreakdown = loadKanjiBreakdown)
     Spacer(Modifier.height(12.dp))
     val isFunctionWord = token.partOfSpeech == PartOfSpeech.PARTICLE ||
             token.partOfSpeech == PartOfSpeech.AUXILIARY_VERB
     if (isFunctionWord) {
-        // No card creation for particles / aux verbs — same rule as before;
-        // single disabled button explaining why.
-        Button(
-            onClick = { /* no-op */ },
-            enabled = false,
-            shape = RoundedCornerShape(24.dp),
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Text("Particles can't be made into cards", fontWeight = FontWeight.SemiBold)
-        }
+        // Particles / aux verbs don't get cards — and we don't show a button
+        // saying so either, per user request. Just stop after the senses.
         return
     }
 
-    // Two inline CTAs — no separate screen. Primary is the default-deck
-    // shortcut when one is set; secondary always opens the picker.
+    // Inline action row: a wide primary "Add to <default deck>" button paired
+    // with a small icon-only chooser to the LEFT. The icon button lets the
+    // user override the default for this one card without burying it under a
+    // second large button.
+    // Split-button row: wide "Add to <Deck>" on the left, square overflow on
+    // the right. They share the same height and sit flush against each other
+    // (a 1 dp hairline gap reads as a divider rather than two separate
+    // buttons). Less-rounded corners (8 dp) so the pair looks like one unit.
     val primaryLabel = defaultDeckName?.let { "Add to $it" } ?: "Add to Anki deck"
-    Button(
-        onClick = { onAddToDefaultDeck(token, entry) },
-        enabled = !isSubmitting,
-        colors = ButtonDefaults.buttonColors(
-            containerColor = MaterialTheme.colorScheme.primary,
-            contentColor = MaterialTheme.colorScheme.onPrimary,
-        ),
-        shape = RoundedCornerShape(24.dp),
-        modifier = Modifier.fillMaxWidth(),
+    val buttonHeight = 48.dp
+    val cornerR = 8.dp
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.fillMaxWidth().height(buttonHeight),
     ) {
-        Text(primaryLabel, fontWeight = FontWeight.SemiBold)
-    }
-    Spacer(Modifier.height(6.dp))
-    androidx.compose.material3.OutlinedButton(
-        onClick = { onChooseDeck(token, entry) },
-        enabled = !isSubmitting,
-        shape = RoundedCornerShape(24.dp),
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Text("Choose specific deck")
+        Button(
+            onClick = { onAddToDefaultDeck(token, entry) },
+            enabled = !isSubmitting,
+            colors = ButtonDefaults.buttonColors(
+                containerColor = MaterialTheme.colorScheme.primary,
+                contentColor = MaterialTheme.colorScheme.onPrimary,
+            ),
+            shape = RoundedCornerShape(
+                topStart = cornerR,
+                bottomStart = cornerR,
+                topEnd = 0.dp,
+                bottomEnd = 0.dp,
+            ),
+            modifier = Modifier.weight(1f).fillMaxHeight(),
+        ) {
+            Text(primaryLabel, fontWeight = FontWeight.SemiBold)
+        }
+        Spacer(Modifier.width(1.dp))
+        Button(
+            onClick = { onChooseDeck(token, entry) },
+            enabled = !isSubmitting,
+            colors = ButtonDefaults.buttonColors(
+                containerColor = MaterialTheme.colorScheme.primary,
+                contentColor = MaterialTheme.colorScheme.onPrimary,
+            ),
+            shape = RoundedCornerShape(
+                topStart = 0.dp,
+                bottomStart = 0.dp,
+                topEnd = cornerR,
+                bottomEnd = cornerR,
+            ),
+            contentPadding = PaddingValues(horizontal = 14.dp),
+            modifier = Modifier.fillMaxHeight(),
+        ) {
+            Icon(
+                imageVector = Icons.Filled.MoreVert,
+                contentDescription = "Choose specific deck",
+            )
+        }
     }
 }
 
@@ -257,31 +283,18 @@ private fun buildTabLabels(entries: List<DictEntry>): List<String> {
 }
 
 @Composable
-private fun EntryDetail(token: Token, entry: DictEntry) {
-    // Header — dictionary form, primary reading, badges.
-    Row(verticalAlignment = Alignment.Bottom) {
-        Text(
-            text = entry.headword.ifEmpty { entry.primaryReading },
-            fontSize = 22.sp,
-            fontWeight = FontWeight.SemiBold,
-        )
-        if (entry.primaryReading.isNotBlank() && entry.primaryReading != entry.headword) {
-            Spacer(Modifier.width(8.dp))
-            Text(
-                text = entry.primaryReading,
-                fontSize = 14.sp,
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
-                modifier = Modifier.padding(bottom = 2.dp),
-            )
-        }
-        Spacer(Modifier.weight(1f))
-        BadgeRow(entry)
-    }
+private fun EntryDetail(
+    token: Token,
+    entry: DictEntry,
+    loadKanjiBreakdown: suspend (DictEntry) -> List<KanjiTile>,
+) {
+    // Header (word + reading + badges) is now rendered up in WordListItem as
+    // an animated colored card. This composable only handles the senses +
+    // other-forms + kanji-breakdown block.
 
     // Senses — POS subtitle per group, then any misc/field/dialect notes,
     // then numbered glosses. Order matters: notes belong BETWEEN the POS
     // label and the gloss (per Stage 2 spec / Kanji Study reference UI).
-    Spacer(Modifier.height(8.dp))
     val posColor = token.partOfSpeech.toColor()
     var previousPos: String? = null
     for ((idx, sense) in entry.senses.withIndex()) {
@@ -332,6 +345,81 @@ private fun EntryDetail(token: Token, entry: DictEntry) {
             }
         }
     }
+
+    // Kanji breakdown — same per-character tiles the Anki card shows, but
+    // inline in the dictionary so the user can browse the constituent kanji
+    // without going to Kanji-Study. Loader is suspend (hits KANJIDIC Room
+    // table), so we fetch via produceState keyed by entry id.
+    val tilesState = produceState<List<KanjiTile>?>(initialValue = null, key1 = entry.id) {
+        value = runCatching { loadKanjiBreakdown(entry) }.getOrNull()
+    }
+    val tiles = tilesState.value
+    if (!tiles.isNullOrEmpty()) {
+        Spacer(Modifier.height(14.dp))
+        Text(
+            "Kanji",
+            fontSize = 11.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = MutedNoteColor,
+        )
+        Spacer(Modifier.height(6.dp))
+        KanjiBreakdownRow(tiles)
+    }
+}
+
+@Composable
+private fun KanjiBreakdownRow(tiles: List<KanjiTile>) {
+    // Horizontally scrollable in case a long compound overflows the screen.
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        for (tile in tiles) {
+            KanjiTileBox(tile)
+        }
+    }
+}
+
+@Composable
+private fun KanjiTileBox(tile: KanjiTile) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier
+            .clip(RoundedCornerShape(8.dp))
+            .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.05f))
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+    ) {
+        if (tile.reading.isNotBlank()) {
+            Text(
+                tile.reading,
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f),
+            )
+            Spacer(Modifier.height(2.dp))
+        }
+        Text(
+            tile.char,
+            fontSize = 28.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+        if (tile.meanings.isNotEmpty()) {
+            Spacer(Modifier.height(4.dp))
+            // No fixed width — the tile takes its natural intrinsic size, so a
+            // long meaning like "training" doesn't wrap to two lines. The row
+            // is in a horizontalScroll() (KanjiBreakdownRow above), so a wider
+            // tile just makes the row scrollable rather than overflowing.
+            Text(
+                tile.meanings.joinToString(", "),
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
+                fontStyle = FontStyle.Italic,
+                maxLines = 1,
+            )
+        }
+    }
 }
 
 private val MutedNoteColor = Color(0xFF78909C)
@@ -353,50 +441,48 @@ private fun SenseNotes(sense: com.tangotori.app.domain.models.Sense) {
 }
 
 @Composable
-private fun BadgeRow(entry: DictEntry) {
+internal fun BadgeRow(entry: DictEntry) {
+    // Inline: JLPT and Common side-by-side. The header row already gives the
+    // word + reading group `weight(1f)` so it pushes the badges right; long
+    // headwords like トレーニング wrap to a second baseline line within the
+    // word/reading group rather than fighting horizontal space with the badges.
     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         entry.jlptLevel?.let { JlptBadge(it) }
         if (entry.isCommon) CommonBadge()
     }
 }
 
+// Badges live inside the WordListItem's red header card now. Use the
+// same on-primary tone as the kana reading next to them so all three
+// pieces of text (word / reading / badges) read as one band.
+private val BadgeForeground: Color
+    @Composable get() = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.85f)
+
 @Composable
 private fun JlptBadge(level: String) {
-    // Per Stage 2 feedback: outlined badge with primary border + text, to
-    // visually distinguish from the filled green "Common" badge.
+    val fg = BadgeForeground
+    // Solid filled chip — matches CommonBadge so the two read as a paired set
+    // rather than "one outlined + one filled" mismatch.
     Box(
         modifier = Modifier
             .clip(RoundedCornerShape(4.dp))
-            .border(
-                width = 1.dp,
-                color = MaterialTheme.colorScheme.primary,
-                shape = RoundedCornerShape(4.dp),
-            )
+            .background(fg.copy(alpha = 0.18f))
             .padding(horizontal = 6.dp, vertical = 2.dp),
     ) {
-        Text(
-            level,
-            fontSize = 11.sp,
-            fontWeight = FontWeight.SemiBold,
-            color = MaterialTheme.colorScheme.primary,
-        )
+        Text(level, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = fg)
     }
 }
 
 @Composable
 private fun CommonBadge() {
+    val fg = BadgeForeground
     Box(
         modifier = Modifier
             .clip(RoundedCornerShape(4.dp))
-            .background(Color(0xFF4CAF50).copy(alpha = 0.18f))
+            .background(fg.copy(alpha = 0.18f))
             .padding(horizontal = 6.dp, vertical = 2.dp),
     ) {
-        Text(
-            "Common",
-            fontSize = 11.sp,
-            fontWeight = FontWeight.SemiBold,
-            color = Color(0xFF2E7D32),
-        )
+        Text("Common", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = fg)
     }
 }
 

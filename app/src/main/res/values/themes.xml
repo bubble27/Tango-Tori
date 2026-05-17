@@ -1,7 +1,25 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!--
+        Splash theme — the activity boots into this one. The SplashScreen
+        API on Android 12+ uses these attributes natively; on Android
+        8–11 the AndroidX core-splashscreen library replicates the look.
+        Once MainActivity finishes its first composition, the post-splash
+        theme [Theme.TangoTori] takes over.
+    -->
+    <style name="Theme.TangoTori.Splash" parent="Theme.SplashScreen">
+        <!-- Parchment matches both the icon's baked-in background and the
+             app's body, so the launch animation feels continuous (no flash
+             of red, no flash of white). -->
+        <item name="windowSplashScreenBackground">@color/surface_parchment</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/ic_splash</item>
+        <item name="postSplashScreenTheme">@style/Theme.TangoTori</item>
+    </style>
+
     <style name="Theme.TangoTori" parent="android:Theme.Material.Light.NoActionBar">
-        <item name="android:statusBarColor">@color/logo_red</item>
-        <item name="android:windowLightStatusBar">false</item>
+        <!-- No TopAppBar in-app, so the status bar sits directly on the
+             parchment surface. Use dark icons for legibility on cream. -->
+        <item name="android:statusBarColor">@color/surface_parchment</item>
+        <item name="android:windowLightStatusBar">true</item>
     </style>
 </resources>

@@ -2,27 +2,22 @@ package com.tangotori.app.ui.components
 
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.scale
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.dp
@@ -46,13 +41,11 @@ import com.tangotori.app.ui.theme.toColor
  * giving a "writing on" feel when the sentence transitions out of edit mode.
  * [enterDelayMillis] staggers the animation across siblings.
  */
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun WordChip(
     token: Token,
     selected: Boolean,
     onClick: () -> Unit,
-    onDoubleClick: () -> Unit,
     modifier: Modifier = Modifier,
     enterDelayMillis: Int = 0,
 ) {
@@ -65,10 +58,6 @@ fun WordChip(
         targetValue = if (selected) 1.06f else 1f,
         animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy),
         label = "chipScale",
-    )
-    val borderThickness by animateDpAsState(
-        targetValue = if (selected) 3.dp else 2.dp,
-        label = "chipBorder",
     )
 
     val chipEnter = remember { Animatable(0f) }
@@ -92,26 +81,34 @@ fun WordChip(
             }
             .scale(scale)
             .background(
-                color = if (selected) posColor.copy(alpha = 0.10f) else Color.Transparent,
+                // Faint tint on the selected chip so the active token is
+                // still identifiable. POS color no longer appears as an
+                // underline — it's the word color itself now.
+                color = if (selected) posColor.copy(alpha = 0.12f) else Color.Transparent,
                 shape = RoundedCornerShape(6.dp),
             )
-            .drawBehind {
-                val y = size.height - borderThickness.toPx() / 2
-                drawLine(
-                    color = posColor,
-                    start = Offset(0f, y),
-                    end = Offset(size.width, y),
-                    strokeWidth = borderThickness.toPx(),
-                )
-            }
-            .combinedClickable(onClick = onClick, onDoubleClick = onDoubleClick)
-            .padding(horizontal = 3.dp),
+            // Plain clickable (no onDoubleClick) so single taps fire instantly.
+            // `combinedClickable` defers onClick by ~300 ms waiting for a possible
+            // second tap, which was making sentence-chip taps occasionally feel
+            // like they "didn't register". Double-tap-to-edit is handled by the
+            // parent Box's combinedClickable in ViewingLayout — double-taps in
+            // empty chip-area space still enter edit mode; double-taps on a chip
+            // just register as two selections of the same word (no-op).
+            .clickable(onClick = onClick)
+            // 6 dp horizontal padding: doubles as touch slop so taps near the
+            // chip edge (or in the gap that used to exist between chips) hit
+            // the chip's clickable instead of falling through to the parent
+            // Box's noop onClick.
+            .padding(horizontal = 6.dp),
         contentAlignment = Alignment.BottomCenter,
     ) {
         FuriganaText(
             surface = token.surface,
             reading = if (token.isPureKana) null else token.reading,
-            textColor = MaterialTheme.colorScheme.onSurface.copy(alpha = alpha),
+            // POS color is now applied to the WORD glyph itself instead of
+            // a 2 dp underline. Reads as a single colored token at a glance,
+            // no extra ink underneath.
+            textColor = posColor.copy(alpha = alpha),
             furiganaColor = MutedFuriganaColor.copy(alpha = alpha),
             bold = selected,
             furiganaAlpha = furiganaEnter.value,

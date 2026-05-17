@@ -29,6 +29,8 @@ app/src/main/assets/jmdict.db
 
 # --- Builder caches (downloaded zips / extracted JSON) ---
 tools/jmdict-builder/.cache/
+# IDE-driven JVM compile output for the builder tool.
+tools/jmdict-builder/bin/
 
 # --- Dev screenshots in repo root ---
 /screen*.png

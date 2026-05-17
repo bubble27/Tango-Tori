@@ -18,6 +18,7 @@ import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.tangotori.app.domain.util.KanjiKanaSplit
+import com.tangotori.app.ui.theme.SerifMixed
 import com.tangotori.app.ui.theme.TangoToriTheme
 
 /**
@@ -89,6 +90,10 @@ private fun FuriganaPart(
     fontSize: TextUnit,
     furiganaSize: TextUnit,
 ) {
+    // Pin the serif family explicitly. Passing NoPaddingTextStyle as the
+    // entire `style` was clobbering the font family inherited from
+    // LocalTextStyle and reverting the top-sentence chips to the system sans.
+    val baseStyle = NoPaddingTextStyle.copy(fontFamily = SerifMixed)
     Layout(
         content = {
             // Slot 0: furigana (always emitted so slot indexing is stable; the
@@ -98,7 +103,7 @@ private fun FuriganaPart(
                 color = furiganaColor.copy(alpha = furiganaColor.alpha * furiganaAlpha),
                 fontSize = furiganaSize,
                 maxLines = 1,
-                style = NoPaddingTextStyle,
+                style = baseStyle,
             )
             // Slot 1: word.
             Text(
@@ -107,7 +112,7 @@ private fun FuriganaPart(
                 fontSize = fontSize,
                 fontWeight = if (bold) FontWeight.SemiBold else FontWeight.Normal,
                 maxLines = 1,
-                style = NoPaddingTextStyle,
+                style = baseStyle,
             )
         },
     ) { measurables, constraints ->
@@ -156,6 +161,11 @@ internal val MutedFuriganaColor = Color(0xFF78909C)
  * containing Box height predictably.
  */
 internal val NoPaddingTextStyle = TextStyle(
+    // Pin the app's serif family here too — this style is applied directly to
+    // the chip's Text via `style = ...`, which fully replaces LocalTextStyle.
+    // Without this the chip falls back to FontFamily.Default (sans), making
+    // the top sentence the only sans-rendered text on the screen.
+    fontFamily = SerifMixed,
     platformStyle = PlatformTextStyle(includeFontPadding = false),
     lineHeightStyle = LineHeightStyle(
         alignment = LineHeightStyle.Alignment.Center,

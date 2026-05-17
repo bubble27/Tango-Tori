@@ -7,12 +7,16 @@ import com.tangotori.app.data.IncomingSentenceBus
 import com.tangotori.app.data.anki.AnkiCardRepository
 import com.tangotori.app.data.anki.AnkiPreferences
 import com.tangotori.app.data.anki.DefaultDeck
+import com.tangotori.app.data.db.JmdictDao
 import com.tangotori.app.domain.models.DictEntry
 import com.tangotori.app.domain.models.PartOfSpeech
 import com.tangotori.app.domain.models.Token
 import com.tangotori.app.domain.usecases.CreateCardUseCase
 import com.tangotori.app.domain.usecases.LookupWordUseCase
 import com.tangotori.app.domain.usecases.TokenizeSentenceUseCase
+import com.tangotori.app.domain.util.FuriganaBuilder
+import com.tangotori.app.domain.util.KanjiBreakdownBuilder
+import com.tangotori.app.domain.util.KanjiTile
 import com.tangotori.app.domain.util.SentenceHtmlBuilder
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.FlowPreview
@@ -86,8 +90,47 @@ class SentenceViewModel @Inject constructor(
     private val createCard: CreateCardUseCase,
     private val ankiPrefs: AnkiPreferences,
     private val incomingBus: IncomingSentenceBus,
+    private val jmdictDao: JmdictDao,
     private val savedState: SavedStateHandle,
 ) : ViewModel() {
+
+    // Cache of computed kanji breakdowns keyed by JMdict entry id. The
+    // breakdown is a synchronous projection of (headword, reading) + per-kanji
+    // readings/meanings from KANJIDIC, but the KANJIDIC lookups are suspend.
+    // Cache to avoid re-querying every recomposition.
+    private val kanjiBreakdownCache = mutableMapOf<Long, List<KanjiTile>>()
+
+    /**
+     * Build a kanji breakdown for the given [entry]'s headword. Shared
+     * splitter with the Anki card path so what the user sees in-app matches
+     * what lands on the card. Returns empty for pure-kana words.
+     */
+    suspend fun loadKanjiBreakdown(entry: DictEntry): List<KanjiTile> {
+        kanjiBreakdownCache[entry.id]?.let { return it }
+        val word = entry.headword.ifEmpty { return emptyList() }
+        val reading = entry.primaryReading
+        val furigana = FuriganaBuilder.build(word, reading)
+        val kanjiChars = word
+            .filter { it.code in 0x3400..0x9FFF || it.code in 0xF900..0xFAFF }
+            .map { it.toString() }
+            .distinct()
+        val rows = kanjiChars.associateWith { jmdictDao.getKanjiDic(it) }
+        val meaningsMap = rows.mapValues { (_, row) ->
+            row?.meanings?.split(';')?.map { it.trim() }?.filter { it.isNotEmpty() }
+                ?: emptyList()
+        }
+        val readingsMap = rows.mapValues { (_, row) ->
+            row?.readings?.split(';')?.map { it.trim() }?.filter { it.isNotEmpty() }?.toSet()
+                ?: emptySet()
+        }
+        val tiles = KanjiBreakdownBuilder.build(
+            furiganaMarkup = furigana,
+            kanjiMeanings = { c -> meaningsMap[c] ?: emptyList() },
+            kanjiReadings = { c -> readingsMap[c] ?: emptySet() },
+        )
+        kanjiBreakdownCache[entry.id] = tiles
+        return tiles
+    }
 
     private val _state = MutableStateFlow(SentenceUiState(input = savedState["input"] ?: ""))
     val state: StateFlow<SentenceUiState> = _state.asStateFlow()
@@ -134,10 +177,15 @@ class SentenceViewModel @Inject constructor(
             .launchIn(viewModelScope)
     }
 
+    /** Public entry point — used by the in-screen Paste button. Forwards
+     *  to the same code path the Android share intent takes. */
+    fun loadSentence(sentence: String) = acceptSharedSentence(sentence)
+
     /**
-     * Load a sentence shared into the app via Android's share intent. Skips
-     * the debounce flow so the user lands in chip view immediately rather
-     * than seeing the input field for half a second.
+     * Load a sentence shared into the app via Android's share intent OR
+     * pasted from the clipboard. Skips the debounce flow so the user lands
+     * in chip view immediately rather than seeing the input field for half
+     * a second.
      */
     private fun acceptSharedSentence(sentence: String) {
         val text = sentence.trim()
@@ -175,10 +223,14 @@ class SentenceViewModel @Inject constructor(
         inputFlow.value = value
     }
 
+    /** Set the active token. Called from chip taps, list-row taps, and the
+     *  scroll-driven focus snapshot. The UI layer decides whether to
+     *  actually render the body (it waits until the list isn't scrolling). */
     fun onTokenSelected(index: Int) {
         val tokens = _state.value.tokens
         if (index !in tokens.indices) return
         if (tokens[index].partOfSpeech == PartOfSpeech.PUNCTUATION) return
+        if (index == _state.value.selectedIndex) return
         _state.value = _state.value.copy(selectedIndex = index)
         if (_state.value.entries[index] == null) {
             fetchEntries(index, tokens[index])
@@ -203,7 +255,10 @@ class SentenceViewModel @Inject constructor(
 
     /** Re-enter edit mode, keeping the current input text intact. */
     fun startEditing() {
-        _state.value = _state.value.copy(isEditing = true, selectedIndex = null)
+        _state.value = _state.value.copy(
+            isEditing = true,
+            selectedIndex = null,
+        )
     }
 
     /** Leave edit mode. */

@@ -1,5 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
-    <background android:drawable="@color/logo_red" />
+    <!-- Matches the parchment fill baked into ic_launcher_foreground.png so
+         the launcher's circular/squircle mask trims pure parchment instead
+         of leaving a hard color edge. -->
+    <background android:drawable="@color/surface_parchment" />
     <foreground android:drawable="@drawable/ic_launcher_foreground" />
 </adaptive-icon>

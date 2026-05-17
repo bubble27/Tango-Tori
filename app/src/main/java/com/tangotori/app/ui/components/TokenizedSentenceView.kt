@@ -50,7 +50,11 @@ fun TokenizedSentenceView(
         modifier = modifier
             .fillMaxWidth()
             .padding(horizontal = 12.dp, vertical = 6.dp),
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        // No horizontal gap between chips — each chip already has its own
+        // horizontal padding, so the touch area for adjacent tokens is flush.
+        // Gaps were creating ~4 dp dead zones where taps fell through to the
+        // parent's empty onClick and did nothing.
+        horizontalArrangement = Arrangement.spacedBy(0.dp),
         verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
         tokens.forEachIndexed { idx, token ->
@@ -62,7 +66,6 @@ fun TokenizedSentenceView(
                     token = token,
                     selected = idx == selectedIndex,
                     onClick = { onTokenClick(idx) },
-                    onDoubleClick = onTokenDoubleClick,
                     enterDelayMillis = delay,
                 )
             }

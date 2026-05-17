@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.ui.Modifier
+import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import com.tangotori.app.data.IncomingSentenceBus
 import com.tangotori.app.ui.sentence.SentenceScreen
 import com.tangotori.app.ui.theme.TangoToriTheme
@@ -20,6 +21,10 @@ class MainActivity : ComponentActivity() {
     @Inject lateinit var incoming: IncomingSentenceBus
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Must run BEFORE super.onCreate so the splash theme is in place
+        // when the system draws the first frame. The call swaps to the
+        // post-splash theme (Theme.TangoTori) for us once content is ready.
+        installSplashScreen()
         super.onCreate(savedInstanceState)
         // Soft hint to the system: prefer 120 Hz for this window. Unlike
         // `preferredDisplayModeId` (which pins the display and caused
