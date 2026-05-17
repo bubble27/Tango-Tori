@@ -110,7 +110,12 @@ fun WordChip(
             // no extra ink underneath.
             textColor = posColor.copy(alpha = alpha),
             furiganaColor = MutedFuriganaColor.copy(alpha = alpha),
-            bold = selected,
+            // Don't bold on selection: the bolder glyph measures wider, which
+            // can re-wrap the chip strip into an extra row when a long word
+            // becomes active. That growth pushes the LazyColumn down mid-snap
+            // and caused the "card title halfway covered by sentence" issue.
+            // The 1.06× scale + tinted background still flag the selection.
+            bold = false,
             furiganaAlpha = furiganaEnter.value,
         )
     }

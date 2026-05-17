@@ -467,16 +467,36 @@ private fun WordList(
         }
     }
 
-    // Enter scroll mode only once the selected card has been **fully scrolled
-    // past** one of the viewport edges. The earlier rule ("any edge crossed")
-    // misfired on cards taller than the viewport — those always extend past
-    // both edges, so they'd flip to scroll mode the instant the user started
-    // dragging and never let the user reach their own bottom buttons.
+    // Snapshot the card's edges at drag start. Trigger fires only when an edge
+    // that was INSIDE the viewport at gesture start is now OUTSIDE — i.e. the
+    // user has actively scrolled the card past a boundary in this gesture.
+    // This separates "user is scrolling within a tall card" (initial edges
+    // already outside, transitions don't fire) from "user is leaving the
+    // card" (an initially-inside edge crosses out).
+    var startTopInside by remember { mutableStateOf(false) }
+    var startBottomInside by remember { mutableStateOf(false) }
+    LaunchedEffect(isDragged, listState, items) {
+        if (!isDragged) return@LaunchedEffect
+        val info = listState.layoutInfo
+        val sel = currentSelected.value
+        val item = if (sel != null) {
+            info.visibleItemsInfo.firstOrNull { items.getOrNull(it.index)?.index == sel }
+        } else null
+        startTopInside = item != null && item.offset >= info.viewportStartOffset
+        startBottomInside = item != null &&
+            item.offset + item.size <= info.viewportEndOffset
+    }
+
+    // Enter scroll mode the moment an edge that started inside the viewport
+    // crosses out, OR when the card has been scrolled fully off-screen.
     //
-    // Past-edge means: card's BOTTOM is above viewport top (scrolled fully
-    // up past) OR card's TOP is below viewport bottom (scrolled fully down
-    // past). Anything in between is "still partially visible" and the card
-    // stays unfurled so the user can pan around inside it.
+    // - Short card (both edges initially inside): triggers as soon as the
+    //   user pushes one edge past the viewport.
+    // - Tall card with top inside / bottom outside: scrolling forward (card
+    //   up) pushes the top out → trigger. Scrolling backward never crosses
+    //   the bottom outward (already outside) → no trigger; user can pan
+    //   freely inside the card body.
+    // - Tall card with bottom inside / top outside (rare): mirror case.
     //
     // Still gated on isDragged so the programmatic post-release snap can't
     // re-arm scroll mode mid-animation.
@@ -487,11 +507,12 @@ private fun WordList(
             val sel = currentSelected.value ?: return@snapshotFlow false
             val item = info.visibleItemsInfo.firstOrNull { row ->
                 items.getOrNull(row.index)?.index == sel
-            } ?: return@snapshotFlow true   // not in visible list → already past
-            // Past-up: bottom edge above viewport top.
-            // Past-down: top edge below viewport bottom.
-            item.offset + item.size <= info.viewportStartOffset ||
-                item.offset >= info.viewportEndOffset
+            } ?: return@snapshotFlow true   // fully off-screen
+            val topNowOutside = item.offset < info.viewportStartOffset
+            val bottomNowOutside =
+                item.offset + item.size > info.viewportEndOffset
+            (startTopInside && topNowOutside) ||
+                (startBottomInside && bottomNowOutside)
         }.collect { crossed ->
             if (crossed && !scrollMode) {
                 scrollMode = true
@@ -575,38 +596,26 @@ private fun WordList(
                 val sel = currentSelected.value ?: return@collect
                 val info = listState.layoutInfo
                 if (info.visibleItemsInfo.isEmpty()) return@collect
-                val anchor = info.viewportStartOffset +
-                    // Anchor sits a small inset below viewport top — keeps a sliver of the
-            // previous item visible (so the user has scroll context) while
-            // putting the active card's title close to the sentence header.
-            12
-                val item = info.visibleItemsInfo.firstOrNull { row ->
-                    items.getOrNull(row.index)?.index == sel
-                }
-                if (item != null) {
-                    val delta = (item.offset - anchor).toFloat()
-                    if (kotlin.math.abs(delta) > 2f) {
-                        coroutineScope.launch {
-                            listState.animateScrollBy(
-                                value = delta,
-                                animationSpec = tween(
-                                    durationMillis = 280,
-                                    easing = FastOutSlowInEasing,
-                                ),
-                            )
-                        }
-                    }
-                } else {
-                    // Selected scrolled fully off — bring it back into view at
-                    // the anchor line.
-                    val filteredIdx = items.indexOfFirst { it.index == sel }
-                    if (filteredIdx >= 0) {
-                        coroutineScope.launch {
-                            listState.animateScrollToItem(
-                                index = filteredIdx,
-                                scrollOffset = -(anchor - info.viewportStartOffset),
-                            )
-                        }
+                // Snap by INDEX rather than computed pixel delta.
+                //
+                // The old animateScrollBy-with-delta approach read item.offset
+                // at the moment of release and animated by that delta. If the
+                // layout shifted DURING the animation (the body unfurling
+                // re-runs measure on the row, the chip strip above can
+                // rewrap when the selected token bolds, etc.) the final
+                // position drifted — that was the "sometimes covered by the
+                // sentence" inconsistency.
+                //
+                // animateScrollToItem(index, scrollOffset = 0) asks the lazy
+                // list to land item `index` at the viewport's start, regardless
+                // of intermediate layout shifts. Final position is canonical.
+                val filteredIdx = items.indexOfFirst { it.index == sel }
+                if (filteredIdx >= 0) {
+                    coroutineScope.launch {
+                        listState.animateScrollToItem(
+                            index = filteredIdx,
+                            scrollOffset = 0,
+                        )
                     }
                 }
             }
@@ -632,23 +641,11 @@ private fun WordList(
             listState.scrollToItem(filteredIdx)
             return@LaunchedEffect
         }
-        val item = info.visibleItemsInfo.firstOrNull { row ->
-            items.getOrNull(row.index)?.index == selectedAbsIndex
-        }
-        if (item != null) {
-            val delta = (item.offset - info.viewportStartOffset - 12).toFloat()
-            if (kotlin.math.abs(delta) > 2f) {
-                listState.animateScrollBy(
-                    value = delta,
-                    animationSpec = tween(
-                        durationMillis = 280,
-                        easing = FastOutSlowInEasing,
-                    ),
-                )
-            }
-        } else {
-            listState.animateScrollToItem(filteredIdx, scrollOffset = -12)
-        }
+        // Always animateScrollToItem with scrollOffset = 0 — see snap-on-
+        // release comment. Same canonical positioning, immune to mid-animation
+        // layout shifts that were causing the card to land half-covered by
+        // the sentence chips.
+        listState.animateScrollToItem(filteredIdx, scrollOffset = 0)
     }
 
     // Body unfurls only when we're NOT in scroll mode and the JMdict lookup
