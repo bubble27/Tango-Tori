@@ -8,11 +8,12 @@
         theme [Theme.TangoTori] takes over.
     -->
     <style name="Theme.TangoTori.Splash" parent="Theme.SplashScreen">
-        <!-- Parchment matches both the icon's baked-in background and the
-             app's body, so the launch animation feels continuous (no flash
-             of red, no flash of white). -->
+        <!-- Parchment background matches the icon wrapper's outer layer and the
+             app body — no flash of a different colour on launch.
+             ic_splash_icon insets the image into the 160dp safe zone so the
+             adaptive-icon circle mask never clips the content. -->
         <item name="windowSplashScreenBackground">@color/surface_parchment</item>
-        <item name="windowSplashScreenAnimatedIcon">@drawable/ic_splash</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/ic_splash_icon</item>
         <item name="postSplashScreenTheme">@style/Theme.TangoTori</item>
     </style>
 

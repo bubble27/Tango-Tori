@@ -27,7 +27,12 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -37,6 +42,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.tangotori.app.domain.models.DictEntry
@@ -52,6 +58,9 @@ import com.tangotori.app.ui.theme.toColor
 import androidx.compose.runtime.produceState
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.TextButton
 
 /**
  * Rich expanded entry view shown beneath a tapped word in the list.
@@ -66,8 +75,10 @@ fun ExpandedEntryCard(
     lookup: EntryLookup?,
     defaultDeckName: String?,
     isSubmitting: Boolean,
+    linkToKanjiStudy: Boolean,
     onAddToDefaultDeck: (Token, DictEntry) -> Unit,
     onChooseDeck: (Token, DictEntry) -> Unit,
+    onToggleLinkStyle: () -> Unit,
     /** Fetcher for per-kanji tiles (char + reading + meanings) shown in the
      *  in-app dictionary's kanji section. Called from a [produceState] keyed
      *  by entry id so flipping tabs re-fetches. */
@@ -90,8 +101,10 @@ fun ExpandedEntryCard(
                 entries = lookup.entries,
                 defaultDeckName = defaultDeckName,
                 isSubmitting = isSubmitting,
+                linkToKanjiStudy = linkToKanjiStudy,
                 onAddToDefaultDeck = onAddToDefaultDeck,
                 onChooseDeck = onChooseDeck,
+                onToggleLinkStyle = onToggleLinkStyle,
                 loadKanjiBreakdown = loadKanjiBreakdown,
             )
         }
@@ -110,7 +123,7 @@ private fun ErrorRow(message: String) {
 @Composable
 private fun EmptyRow() {
     Text(
-        "No JMdict entry for this word.",
+        "No dictionary entry found.",
         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
         fontSize = 13.sp,
         fontStyle = FontStyle.Italic,
@@ -123,8 +136,10 @@ private fun EntryBody(
     entries: List<DictEntry>,
     defaultDeckName: String?,
     isSubmitting: Boolean,
+    linkToKanjiStudy: Boolean,
     onAddToDefaultDeck: (Token, DictEntry) -> Unit,
     onChooseDeck: (Token, DictEntry) -> Unit,
+    onToggleLinkStyle: () -> Unit,
     loadKanjiBreakdown: suspend (DictEntry) -> List<KanjiTile>,
 ) {
     // Multi-entry: tab strip. Preserve selection across recompositions but reset
@@ -161,6 +176,7 @@ private fun EntryBody(
     val primaryLabel = defaultDeckName?.let { "Add to $it" } ?: "Add to Anki deck"
     val buttonHeight = 48.dp
     val cornerR = 8.dp
+    var menuExpanded by remember { mutableStateOf(false) }
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier.fillMaxWidth().height(buttonHeight),
@@ -183,26 +199,51 @@ private fun EntryBody(
             Text(primaryLabel, fontWeight = FontWeight.SemiBold)
         }
         Spacer(Modifier.width(1.dp))
-        Button(
-            onClick = { onChooseDeck(token, entry) },
-            enabled = !isSubmitting,
-            colors = ButtonDefaults.buttonColors(
-                containerColor = MaterialTheme.colorScheme.primary,
-                contentColor = MaterialTheme.colorScheme.onPrimary,
-            ),
-            shape = RoundedCornerShape(
-                topStart = 0.dp,
-                bottomStart = 0.dp,
-                topEnd = cornerR,
-                bottomEnd = cornerR,
-            ),
-            contentPadding = PaddingValues(horizontal = 14.dp),
-            modifier = Modifier.fillMaxHeight(),
-        ) {
-            Icon(
-                imageVector = Icons.Filled.MoreVert,
-                contentDescription = "Choose specific deck",
-            )
+        Box {
+            Button(
+                onClick = { menuExpanded = true },
+                enabled = !isSubmitting,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    contentColor = MaterialTheme.colorScheme.onPrimary,
+                ),
+                shape = RoundedCornerShape(
+                    topStart = 0.dp,
+                    bottomStart = 0.dp,
+                    topEnd = cornerR,
+                    bottomEnd = cornerR,
+                ),
+                contentPadding = PaddingValues(horizontal = 14.dp),
+                modifier = Modifier.fillMaxHeight(),
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.MoreVert,
+                    contentDescription = "More options",
+                )
+            }
+            DropdownMenu(
+                expanded = menuExpanded,
+                onDismissRequest = { menuExpanded = false },
+            ) {
+                DropdownMenuItem(
+                    text = { Text("Choose deck") },
+                    onClick = {
+                        menuExpanded = false
+                        onChooseDeck(token, entry)
+                    },
+                )
+                HorizontalDivider()
+                DropdownMenuItem(
+                    text = { Text("Kanji Study links") },
+                    trailingIcon = if (linkToKanjiStudy) {
+                        { Icon(Icons.Filled.Check, contentDescription = null, modifier = Modifier.size(18.dp)) }
+                    } else null,
+                    onClick = {
+                        menuExpanded = false
+                        onToggleLinkStyle()
+                    },
+                )
+            }
         }
     }
 }
@@ -295,11 +336,12 @@ private fun EntryDetail(
     // Senses — POS subtitle per group, then any misc/field/dialect notes,
     // then numbered glosses. Order matters: notes belong BETWEEN the POS
     // label and the gloss (per Stage 2 spec / Kanji Study reference UI).
+    val hasHiragana = entry.readings.any { r -> r.text.any { c -> c.code in 0x3040..0x309F } }
     val posColor = token.partOfSpeech.toColor()
     var previousPos: String? = null
     for ((idx, sense) in entry.senses.withIndex()) {
         val posLine = sense.partOfSpeech.joinToString(";")
-        if (posLine != previousPos) {
+        if (posLine != previousPos && posLine.isNotBlank()) {
             Text(
                 text = formatPos(posLine),
                 color = posColor,
@@ -357,7 +399,7 @@ private fun EntryDetail(
     if (!tiles.isNullOrEmpty()) {
         Spacer(Modifier.height(14.dp))
         Text(
-            "Kanji",
+            if (hasHiragana) "Kanji" else "Hanzi",
             fontSize = 11.sp,
             fontWeight = FontWeight.SemiBold,
             color = MutedNoteColor,
@@ -384,11 +426,13 @@ private fun KanjiBreakdownRow(tiles: List<KanjiTile>) {
 
 @Composable
 private fun KanjiTileBox(tile: KanjiTile) {
+    var showDetail by remember { mutableStateOf(false) }
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         modifier = Modifier
             .clip(RoundedCornerShape(8.dp))
             .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.05f))
+            .clickable { showDetail = true }
             .padding(horizontal = 10.dp, vertical = 8.dp),
     ) {
         if (tile.reading.isNotBlank()) {
@@ -407,19 +451,65 @@ private fun KanjiTileBox(tile: KanjiTile) {
         )
         if (tile.meanings.isNotEmpty()) {
             Spacer(Modifier.height(4.dp))
-            // No fixed width — the tile takes its natural intrinsic size, so a
-            // long meaning like "training" doesn't wrap to two lines. The row
-            // is in a horizontalScroll() (KanjiBreakdownRow above), so a wider
-            // tile just makes the row scrollable rather than overflowing.
             Text(
                 tile.meanings.joinToString(", "),
                 fontSize = 11.sp,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
                 fontStyle = FontStyle.Italic,
-                maxLines = 1,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
             )
         }
     }
+    if (showDetail) {
+        CharDetailDialog(tile = tile, onDismiss = { showDetail = false })
+    }
+}
+
+@Composable
+private fun CharDetailDialog(tile: KanjiTile, onDismiss: () -> Unit) {
+    val defs = tile.allMeanings.ifEmpty { tile.meanings }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    tile.char,
+                    fontSize = 52.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                if (tile.reading.isNotBlank()) {
+                    Text(
+                        tile.reading,
+                        fontSize = 16.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
+                    )
+                }
+            }
+        },
+        text = {
+            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                defs.forEachIndexed { i, def ->
+                    if (i > 0) Spacer(Modifier.height(6.dp))
+                    Row {
+                        Text(
+                            "${i + 1}. ",
+                            fontSize = 14.sp,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f),
+                        )
+                        Text(def, fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface)
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Close") }
+        },
+    )
 }
 
 private val MutedNoteColor = Color(0xFF78909C)

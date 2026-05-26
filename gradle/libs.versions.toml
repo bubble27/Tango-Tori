@@ -16,6 +16,8 @@ navigationCompose = "2.8.5"
 coroutines = "1.9.0"
 datastore = "1.1.1"
 sudachi = "0.7.5"
+jieba = "1.0.2"
+pinyin4j = "2.5.1"
 ankidroidApi = "api-v1.1.0"
 junit = "4.13.2"
 androidxJunit = "1.2.1"
@@ -53,6 +55,8 @@ kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-
 kotlinx-coroutines-test = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-test", version.ref = "coroutines" }
 
 sudachi = { group = "com.worksap.nlp", name = "sudachi", version.ref = "sudachi" }
+jieba = { group = "com.huaban", name = "jieba-analysis", version.ref = "jieba" }
+pinyin4j = { group = "com.belerweb", name = "pinyin4j", version.ref = "pinyin4j" }
 
 ankidroid-api = { group = "com.github.ankidroid", name = "Anki-Android", version.ref = "ankidroidApi" }
 

@@ -3,14 +3,23 @@ package com.tangotori.app.ui.sentence
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.Crossfade
 import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.gestures.animateScrollBy
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Dp
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
@@ -30,6 +39,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -89,7 +99,9 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.yield
 import com.tangotori.app.domain.models.DictEntry
+import com.tangotori.app.domain.models.Language
 import com.tangotori.app.domain.models.PartOfSpeech
 import com.tangotori.app.domain.models.Token
 import com.tangotori.app.domain.util.KanjiTile
@@ -201,9 +213,11 @@ fun SentenceScreen(
             if (editing) {
                 EditingLayout(
                     input = state.input,
+                    languageOverride = state.languageOverride,
                     onInputChange = viewModel::onInputChange,
                     onFinishEditing = viewModel::finishEditing,
                     onPasteSentence = viewModel::loadSentence,
+                    onSetLanguage = viewModel::setLanguageOverride,
                 )
             } else {
                 ViewingLayout(
@@ -220,6 +234,7 @@ fun SentenceScreen(
                         ensurePermissionThen(PendingCardAction.OpenPicker(t, e))
                     },
                     loadKanjiTiles = viewModel::loadKanjiBreakdown,
+                    onToggleLinkStyle = viewModel::toggleLinkStyle,
                 )
             }
         }
@@ -261,18 +276,24 @@ private sealed interface PendingCardAction {
 }
 
 /**
- * Edit mode layout: the input field is vertically centered on screen, with a
- * "Finish editing" button below it. Word list and chip view are not shown
- * — this state is pure text entry.
+ * Edit mode layout: language toggle at top, input field, then action buttons.
  */
 @Composable
 private fun EditingLayout(
     input: String,
+    languageOverride: Language?,
     onInputChange: (String) -> Unit,
     onFinishEditing: () -> Unit,
     onPasteSentence: (String) -> Unit,
+    onSetLanguage: (Language?) -> Unit,
 ) {
     val clipboard = LocalClipboardManager.current
+    val placeholder = when (languageOverride) {
+        Language.JAPANESE -> "Paste a Japanese sentence…"
+        Language.CHINESE_SIMPLIFIED,
+        Language.CHINESE_TRADITIONAL -> "Paste a Chinese sentence…"
+        null -> "Paste Japanese or Chinese text…"
+    }
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -280,6 +301,12 @@ private fun EditingLayout(
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
+        LanguageToggle(
+            selected = languageOverride,
+            onSelect = onSetLanguage,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Spacer(Modifier.height(28.dp))
         BasicTextField(
             value = input,
             onValueChange = onInputChange,
@@ -293,7 +320,7 @@ private fun EditingLayout(
             decorationBox = { inner ->
                 if (input.isEmpty()) {
                     Text(
-                        "Paste a Japanese sentence",
+                        placeholder,
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
                         fontSize = 20.sp,
                     )
@@ -302,9 +329,6 @@ private fun EditingLayout(
             },
         )
         Spacer(Modifier.height(20.dp))
-        // Paste button — reads the most recent clipboard item and routes it
-        // through the same flow as the share intent (overwrites the field +
-        // jumps straight to chip view).
         Button(
             onClick = {
                 val text = clipboard.getText()?.text?.trim().orEmpty()
@@ -352,6 +376,7 @@ private fun ViewingLayout(
     onAddToDefaultDeck: (Token, DictEntry) -> Unit,
     onChooseDeck: (Token, DictEntry) -> Unit,
     loadKanjiTiles: suspend (DictEntry) -> List<KanjiTile>,
+    onToggleLinkStyle: () -> Unit,
 ) {
     Column(
         modifier = Modifier.fillMaxSize(),
@@ -360,16 +385,8 @@ private fun ViewingLayout(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                // Double-tap-only detector. combinedClickable here intercepted
-                // EVERY pointer down (it has to, in case the second tap arrives
-                // within the double-click window) and intermittently won the
-                // race against the inner WordChip's combinedClickable, eating
-                // single taps. detectTapGestures with only onDoubleTap doesn't
-                // claim single taps, so chip clicks pass through reliably.
                 .pointerInput(Unit) {
-                    detectTapGestures(
-                        onDoubleTap = { onStartEditing() },
-                    )
+                    detectTapGestures(onDoubleTap = { onStartEditing() })
                 }
                 .padding(horizontal = 8.dp, vertical = 6.dp),
         ) {
@@ -393,9 +410,11 @@ private fun ViewingLayout(
                 entries = state.entries,
                 defaultDeckName = state.defaultDeck?.name,
                 isSubmittingCard = state.isSubmittingCard,
+                linkToKanjiStudy = state.linkToKanjiStudy,
                 onTokenSelected = onTokenSelected,
                 onAddToDefaultDeck = onAddToDefaultDeck,
                 onChooseDeck = onChooseDeck,
+                onToggleLinkStyle = onToggleLinkStyle,
                 loadKanjiTiles = loadKanjiTiles,
                 listState = listState,
             )
@@ -417,14 +436,19 @@ private fun WordList(
     entries: Map<Int, EntryLookup>,
     defaultDeckName: String?,
     isSubmittingCard: Boolean,
+    linkToKanjiStudy: Boolean,
     onTokenSelected: (Int) -> Unit,
     onAddToDefaultDeck: (Token, DictEntry) -> Unit,
     onChooseDeck: (Token, DictEntry) -> Unit,
+    onToggleLinkStyle: () -> Unit,
     loadKanjiTiles: suspend (DictEntry) -> List<KanjiTile>,
     listState: LazyListState,
 ) {
     val haptic = LocalHapticFeedback.current
     val coroutineScope = androidx.compose.runtime.rememberCoroutineScope()
+    // ~4 collapsed card heights of buffer before scroll mode arms on the
+    // bottom-visible trigger. Captured here so it's available in snapshotFlow.
+    val scrollTriggerBufferPx = with(LocalDensity.current) { 192.dp.toPx() }
     val isScrolling by remember { derivedStateOf { listState.isScrollInProgress } }
     // Finger-on-screen flag. Used to gate scroll-mode entry so that the
     // post-release snap animation (programmatic scroll, no finger) can't
@@ -444,6 +468,11 @@ private fun WordList(
     //     `scrollMode` flips back off; the now-focused card slides into
     //     position and unfurls.
     var scrollMode by remember { mutableStateOf(false) }
+    // True while the chip-tap scroll animation is running. Body expansion is
+    // suppressed during this window so the item's layout height stays constant
+    // throughout animateScrollBy — a growing item during animation makes the
+    // pre-computed delta stale, landing the card in the wrong position.
+    var isScrollingToItem by remember { mutableStateOf(false) }
 
     // Tracks the most recent scroll delta sign so we can pick the right
     // "adjacent" word when the user first enters scroll mode (next vs. prev).
@@ -467,39 +496,18 @@ private fun WordList(
         }
     }
 
-    // Snapshot the card's edges at drag start. Trigger fires only when an edge
-    // that was INSIDE the viewport at gesture start is now OUTSIDE — i.e. the
-    // user has actively scrolled the card past a boundary in this gesture.
-    // This separates "user is scrolling within a tall card" (initial edges
-    // already outside, transitions don't fire) from "user is leaving the
-    // card" (an initially-inside edge crosses out).
-    var startTopInside by remember { mutableStateOf(false) }
-    var startBottomInside by remember { mutableStateOf(false) }
-    LaunchedEffect(isDragged, listState, items) {
-        if (!isDragged) return@LaunchedEffect
-        val info = listState.layoutInfo
-        val sel = currentSelected.value
-        val item = if (sel != null) {
-            info.visibleItemsInfo.firstOrNull { items.getOrNull(it.index)?.index == sel }
-        } else null
-        startTopInside = item != null && item.offset >= info.viewportStartOffset
-        startBottomInside = item != null &&
-            item.offset + item.size <= info.viewportEndOffset
-    }
-
-    // Enter scroll mode the moment an edge that started inside the viewport
-    // crosses out, OR when the card has been scrolled fully off-screen.
+    // Scroll mode arms when either:
+    //   top  > beforeContentPadding  →  card pushed DOWN from its dock
+    //                                   position (navigating to earlier words)
+    //   bottom < viewportEnd - buffer  →  card's bottom has risen into the
+    //                                   viewport by at least ~4 card heights
+    //                                   (navigating to later words / finished
+    //                                   reading a tall entry)
+    // For a SHORT card the second condition is already true when docked, so
+    // any drag arms scroll mode. For a TALL card neither fires at rest.
     //
-    // - Short card (both edges initially inside): triggers as soon as the
-    //   user pushes one edge past the viewport.
-    // - Tall card with top inside / bottom outside: scrolling forward (card
-    //   up) pushes the top out → trigger. Scrolling backward never crosses
-    //   the bottom outward (already outside) → no trigger; user can pan
-    //   freely inside the card body.
-    // - Tall card with bottom inside / top outside (rare): mirror case.
-    //
-    // Still gated on isDragged so the programmatic post-release snap can't
-    // re-arm scroll mode mid-animation.
+    // Gated on isDragged so the programmatic post-release snap (no finger on
+    // screen) can never re-arm scroll mode mid-animation.
     LaunchedEffect(listState, items) {
         snapshotFlow {
             if (!isDragged) return@snapshotFlow false
@@ -508,11 +516,8 @@ private fun WordList(
             val item = info.visibleItemsInfo.firstOrNull { row ->
                 items.getOrNull(row.index)?.index == sel
             } ?: return@snapshotFlow true   // fully off-screen
-            val topNowOutside = item.offset < info.viewportStartOffset
-            val bottomNowOutside =
-                item.offset + item.size > info.viewportEndOffset
-            (startTopInside && topNowOutside) ||
-                (startBottomInside && bottomNowOutside)
+            item.offset > info.beforeContentPadding ||
+                item.offset + item.size < info.viewportEndOffset - scrollTriggerBufferPx
         }.collect { crossed ->
             if (crossed && !scrollMode) {
                 scrollMode = true
@@ -588,6 +593,14 @@ private fun WordList(
                 }
                 if (snapped) return@collect
                 snapped = true
+                // Yield before reading scrollMode so that any
+                // LaunchedEffect(selectedAbsIndex) dispatched in the same
+                // frame (e.g. a chip tap that coincided with the scroll
+                // settling) runs first and sets scrollMode = false. Without
+                // this, the snap reads scrollMode=true, starts an animation,
+                // and LaunchedEffect immediately cancels it — the brief
+                // competing animation appears as "word slightly too high."
+                yield()
                 // Capture BEFORE flipping — the snap decision is based on
                 // whether we were in scroll-mode at the moment of release.
                 val wasInScrollMode = scrollMode
@@ -621,38 +634,48 @@ private fun WordList(
             }
     }
 
-    // Auto-scroll & scroll-mode reset on manual selection.
+    // Chip-tap scroll: dock the focused card flush with the viewport top, then unfurl.
     //
-    //   - When `selectedAbsIndex` changes AND it didn't come from a drag
-    //     (i.e. the user tapped a chip or a row), force-exit scroll mode so
-    //     the body actually unfurls — without this, a chip tap that lands
-    //     during a fling-settle window leaves `scrollMode = true` and the
-    //     card never opens (the "tapping a word does nothing" bug).
-    //   - Then glide the selected card so its top sits just below the
-    //     sentence header, body maximally visible.
+    // Uses animateScrollToItem rather than a pre-computed animateScrollBy delta.
+    // The delta approach failed because two layout changes happen during the animation:
+    //   1. The newly-focused header grows (200 ms tween, 16 sp → 30 sp + padding).
+    //   2. The previously-focused header collapses (snap), shifting everything below it.
+    // A delta sampled at t=0 is stale by t=300 ms, so the card consistently landed
+    // in the wrong place. animateScrollToItem re-evaluates the target offset every
+    // frame, absorbing both changes automatically.
+    //
+    // isScrollingToItem is set before the first suspension point so the body
+    // is suppressed from frame 1 — not after a withFrameNanos wait. This eliminates
+    // the one-frame window where a cached lookup could briefly flash the body open.
     LaunchedEffect(selectedAbsIndex) {
         if (selectedAbsIndex == null) return@LaunchedEffect
         if (isDragged) return@LaunchedEffect
         if (scrollMode) scrollMode = false
         val filteredIdx = items.indexOfFirst { it.index == selectedAbsIndex }
         if (filteredIdx < 0) return@LaunchedEffect
-        val info = listState.layoutInfo
-        if (info.viewportSize.height == 0) {
-            listState.scrollToItem(filteredIdx)
-            return@LaunchedEffect
+        isScrollingToItem = true
+        // Wait one frame for the body-collapse (ExitTransition.None, triggered by
+        // isScrollingToItem = true above) to complete its layout pass and be
+        // reflected in listState.layoutInfo. Without this, animateScrollToItem reads
+        // stale item offsets that still include the old body height, targets the
+        // wrong scroll position, and overshoots — visually appearing as the card
+        // landing slightly too high until the new entry's body loads.
+        withFrameNanos {}
+        try {
+            listState.animateScrollToItem(index = filteredIdx, scrollOffset = 0)
+        } finally {
+            isScrollingToItem = false
         }
-        // Always animateScrollToItem with scrollOffset = 0 — see snap-on-
-        // release comment. Same canonical positioning, immune to mid-animation
-        // layout shifts that were causing the card to land half-covered by
-        // the sentence chips.
-        listState.animateScrollToItem(filteredIdx, scrollOffset = 0)
     }
 
-    // Body unfurls only when we're NOT in scroll mode and the JMdict lookup
-    // has come back. Loading is signalled by the in-header spinner.
+    // Body unfurls once the chip-tap scroll settles AND a lookup has been
+    // initiated (entries[it] != null). The body immediately shows a skeleton
+    // while loading; Crossfade inside the body Surface transitions to the real
+    // entry once the lookup completes (bodyReady = true in WordListItem).
     val expandedAbsIndex = selectedAbsIndex
         ?.takeIf { !scrollMode }
-        ?.takeIf { entries[it]?.entries != null }
+        ?.takeIf { !isScrollingToItem }
+        ?.takeIf { entries[it] != null }
     // Top-down staggered fade-in. Driven by a single Animatable in the parent;
     // each row reads State<Float> inside a graphicsLayer block (re-evaluates
     // on draw without recomposing). Once the entrance completes we flip
@@ -701,9 +724,11 @@ private fun WordList(
                 lookup = if (isFocused || isExpanded) entries[absIdx] else null,
                 defaultDeckName = defaultDeckName,
                 isSubmittingCard = isSubmittingCard,
+                linkToKanjiStudy = linkToKanjiStudy,
                 onClick = { onTokenSelected(absIdx) },
                 onAddToDefaultDeck = onAddToDefaultDeck,
                 onChooseDeck = onChooseDeck,
+                onToggleLinkStyle = onToggleLinkStyle,
                 loadKanjiTiles = loadKanjiTiles,
             )
             HorizontalDivider(
@@ -740,9 +765,11 @@ private fun WordListItem(
     lookup: EntryLookup?,
     defaultDeckName: String?,
     isSubmittingCard: Boolean,
+    linkToKanjiStudy: Boolean,
     onClick: () -> Unit,
     onAddToDefaultDeck: (Token, DictEntry) -> Unit,
     onChooseDeck: (Token, DictEntry) -> Unit,
+    onToggleLinkStyle: () -> Unit,
     loadKanjiTiles: suspend (DictEntry) -> List<KanjiTile>,
 ) {
     val isFunctionWord = token.partOfSpeech == PartOfSpeech.PARTICLE ||
@@ -784,12 +811,17 @@ private fun WordListItem(
     // user's scroll instantly. Font size also bumps when focused so the
     // active word reads as the page header. The body underneath is gated
     // separately by [expanded] (commits after scrolling settles).
+    // Expand with a short tween when gaining focus; collapse instantly (snap)
+    // when losing focus so the previously-focused card gets out of the way
+    // without animating its layout height.
     val animatedTitleSize by animateFloatAsState(
         targetValue = if (focused) 30f else titleSize.value,
+        animationSpec = if (focused) tween(durationMillis = 200) else snap(),
         label = "wordListTitleSize",
     )
     val animatedReadingSize by animateFloatAsState(
         targetValue = if (focused) 16f else readingSize.value,
+        animationSpec = if (focused) tween(durationMillis = 200) else snap(),
         label = "wordListReadingSize",
     )
     val headerBgColor by animateColorAsState(
@@ -825,9 +857,7 @@ private fun WordListItem(
         Surface(
             color = headerBgColor,
             shape = headerShape,
-            modifier = Modifier
-                .fillMaxWidth()
-                .animateContentSize(),
+            modifier = Modifier.fillMaxWidth(),
         ) {
             // Outer row layout:
             //   [donut (fixed slot, only on focus+loading)]
@@ -846,14 +876,6 @@ private fun WordListItem(
                     vertical = if (focused) 12.dp else 4.dp,
                 ),
             ) {
-                if (focused && lookup?.loading == true) {
-                    androidx.compose.material3.CircularProgressIndicator(
-                        strokeWidth = 2.dp,
-                        color = headerTextColor.copy(alpha = 0.78f),
-                        modifier = Modifier.size(16.dp),
-                    )
-                    Spacer(Modifier.width(10.dp))
-                }
                 Row(
                     verticalAlignment = Alignment.Bottom,
                     modifier = Modifier.weight(1f),
@@ -896,10 +918,10 @@ private fun WordListItem(
         // their finger. Enter is still animated for the smooth unfurl on
         // release.
         androidx.compose.animation.AnimatedVisibility(
-            visible = expanded && bodyReady,
+            visible = expanded,
             enter = androidx.compose.animation.expandVertically(
                 animationSpec = tween(durationMillis = 260),
-                expandFrom = Alignment.Top,
+                expandFrom = Alignment.Bottom,
             ) + androidx.compose.animation.fadeIn(animationSpec = tween(220)),
             exit = androidx.compose.animation.ExitTransition.None,
         ) {
@@ -912,15 +934,32 @@ private fun WordListItem(
                 shape = bodyShape,
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                ExpandedEntryCard(
-                    token = token,
-                    lookup = lookup,
-                    defaultDeckName = defaultDeckName,
-                    isSubmitting = isSubmittingCard,
-                    onAddToDefaultDeck = onAddToDefaultDeck,
-                    onChooseDeck = onChooseDeck,
-                    loadKanjiBreakdown = loadKanjiTiles,
-                )
+                // Crossfade between the shimmer skeleton (while lookup is in
+                // flight) and the real entry (once bodyReady flips true).
+                // The 200 ms fade is short enough to feel instant on fast
+                // devices while still masking the height change as the real
+                // content (which may be taller than the skeleton) unfurls.
+                Crossfade(
+                    targetState = bodyReady,
+                    animationSpec = tween(durationMillis = 200),
+                    label = "entryLoad",
+                ) { ready ->
+                    if (ready) {
+                        ExpandedEntryCard(
+                            token = token,
+                            lookup = lookup,
+                            defaultDeckName = defaultDeckName,
+                            isSubmitting = isSubmittingCard,
+                            linkToKanjiStudy = linkToKanjiStudy,
+                            onAddToDefaultDeck = onAddToDefaultDeck,
+                            onChooseDeck = onChooseDeck,
+                            onToggleLinkStyle = onToggleLinkStyle,
+                            loadKanjiBreakdown = loadKanjiTiles,
+                        )
+                    } else {
+                        EntrySkeletonBody()
+                    }
+                }
             }
         }
     }
@@ -1023,6 +1062,145 @@ private fun DeckRow(
                     text = "default",
                     fontSize = 11.sp,
                     color = MaterialTheme.colorScheme.primary,
+                )
+            }
+        }
+    }
+}
+
+// ─────────────────────────────── Skeleton loading ───────────────────────────────
+
+/**
+ * Placeholder body shown while the JMdict lookup is in flight.
+ * Matches the approximate vertical size of a 2–3 sense entry so the body
+ * expands to roughly its final height on the first frame, and the subsequent
+ * Crossfade to real content feels like a reveal rather than a resize.
+ */
+@Composable
+private fun EntrySkeletonBody() {
+    BoxWithConstraints(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 16.dp, end = 16.dp, top = 20.dp, bottom = 14.dp),
+    ) {
+        val widthPx = with(LocalDensity.current) { maxWidth.toPx() }
+        val brush = shimmerBrush(widthPx)
+        Column {
+            // POS label
+            SkeletonBar(brush, widthFraction = 0.32f, height = 11.dp)
+            Spacer(Modifier.height(6.dp))
+            // Sense lines
+            SkeletonBar(brush, widthFraction = 0.92f, height = 14.dp)
+            Spacer(Modifier.height(8.dp))
+            SkeletonBar(brush, widthFraction = 0.76f, height = 14.dp)
+            Spacer(Modifier.height(8.dp))
+            SkeletonBar(brush, widthFraction = 0.58f, height = 14.dp)
+            Spacer(Modifier.height(16.dp))
+            // Action button
+            SkeletonBar(brush, widthFraction = 1f, height = 48.dp, cornerRadius = 8.dp)
+        }
+    }
+}
+
+@Composable
+private fun SkeletonBar(
+    brush: Brush,
+    widthFraction: Float,
+    height: Dp,
+    cornerRadius: Dp = 5.dp,
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth(widthFraction)
+            .height(height)
+            .clip(RoundedCornerShape(cornerRadius))
+            .background(brush),
+    )
+}
+
+/** A gradient sweep that moves left-to-right on an infinite loop. */
+@Composable
+private fun shimmerBrush(widthPx: Float): Brush {
+    val transition = rememberInfiniteTransition(label = "shimmer")
+    val x by transition.animateFloat(
+        initialValue = -widthPx,
+        targetValue = widthPx * 2f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 900, easing = LinearEasing),
+        ),
+        label = "shimmerX",
+    )
+    val base = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.10f)
+    val highlight = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.24f)
+    return Brush.linearGradient(
+        colors = listOf(base, highlight, base),
+        start = Offset(x, 0f),
+        end = Offset(x + widthPx, 0f),
+    )
+}
+
+/**
+ * Three-way segmented toggle: Auto | 🇯🇵 Japanese | 🇨🇳 Chinese.
+ * [selected] null = auto-detect. Placed in the editing screen above the input
+ * field so the user picks the language before or after typing.
+ */
+@Composable
+private fun LanguageToggle(
+    selected: Language?,
+    onSelect: (Language?) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    data class Segment(val lang: Language?, val emoji: String, val label: String)
+    val segments = listOf(
+        Segment(null, "🌐", "Auto"),
+        Segment(Language.JAPANESE, "🇯🇵", "Japanese"),
+        Segment(Language.CHINESE_SIMPLIFIED, "🇨🇳", "Chinese"),
+    )
+    Row(
+        modifier = modifier
+            .height(80.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant),
+    ) {
+        segments.forEachIndexed { i, seg ->
+            val isSelected = selected == seg.lang ||
+                (seg.lang == Language.CHINESE_SIMPLIFIED && selected == Language.CHINESE_TRADITIONAL)
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxHeight()
+                    .clip(
+                        when (i) {
+                            0 -> RoundedCornerShape(topStart = 14.dp, bottomStart = 14.dp)
+                            segments.lastIndex -> RoundedCornerShape(topEnd = 14.dp, bottomEnd = 14.dp)
+                            else -> RoundedCornerShape(0.dp)
+                        }
+                    )
+                    .background(
+                        if (isSelected) MaterialTheme.colorScheme.primary
+                        else Color.Transparent
+                    )
+                    .clickable { onSelect(seg.lang) },
+                contentAlignment = Alignment.Center,
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(seg.emoji, fontSize = 26.sp)
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        text = seg.label,
+                        fontSize = 11.sp,
+                        fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
+                        color = if (isSelected) MaterialTheme.colorScheme.onPrimary
+                                else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            if (i < segments.lastIndex) {
+                Box(
+                    Modifier
+                        .width(1.dp)
+                        .fillMaxHeight()
+                        .background(MaterialTheme.colorScheme.outline.copy(alpha = 0.25f))
                 )
             }
         }

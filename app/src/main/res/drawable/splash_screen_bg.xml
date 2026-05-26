@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Full-screen splash background: parchment base with the app icon centered
+    at its natural size. Used instead of windowSplashScreenAnimatedIcon so
+    the image is never clipped to the adaptive-icon circle.
+-->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item>
+        <color android:color="@color/surface_parchment" />
+    </item>
+    <item android:gravity="center">
+        <bitmap
+            android:src="@drawable/ic_splash"
+            android:gravity="center"
+            android:tileMode="disabled" />
+    </item>
+</layer-list>

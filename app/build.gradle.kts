@@ -97,6 +97,8 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
 
     implementation(libs.sudachi)
+    implementation(libs.jieba)
+    implementation(libs.pinyin4j)
 
     // AnkiDroid API via JitPack — used for Stage 3.
     // If the JitPack resolution fails locally, comment this out and the

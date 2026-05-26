@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Splash screen animated icon wrapper.
+
+    The parchment background layer matches windowSplashScreenBackground, making
+    the adaptive-icon circle boundary invisible. The bitmap is inset by 40dp on
+    all sides so it occupies the 160dp safe zone (of the 240dp icon canvas) and
+    is never clipped by the circular mask. gravity="fill" scales the square
+    image to exactly fill the 160dp inner area.
+-->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item>
+        <color android:color="@color/surface_parchment" />
+    </item>
+    <item
+        android:top="40dp"
+        android:bottom="40dp"
+        android:left="40dp"
+        android:right="40dp">
+        <bitmap
+            android:src="@drawable/ic_splash"
+            android:gravity="fill" />
+    </item>
+</layer-list>

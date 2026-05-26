@@ -12,6 +12,7 @@ data class KanjiTile(
     val char: String,
     val reading: String,
     val meanings: List<String>,
+    val allMeanings: List<String> = emptyList(),
 )
 
 /**
@@ -54,10 +55,12 @@ object KanjiBreakdownBuilder {
         }
 
         return raw.map { t ->
+            val all = kanjiMeanings(t.char)
             KanjiTile(
                 char = t.char,
                 reading = t.reading,
-                meanings = kanjiMeanings(t.char).take(maxMeaningsPerChar),
+                meanings = all.take(maxMeaningsPerChar),
+                allMeanings = all,
             )
         }
     }

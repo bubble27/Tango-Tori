@@ -6,26 +6,35 @@ import com.tangotori.app.domain.models.Token.Companion.isKanji
 
 /**
  * Renders the original sentence as HTML for the Anki Sentence field.
+ * Supports both Japanese (kana ruby) and Chinese (pinyin ruby) via [isChinese].
+ *
  * Each content word becomes:
- *   <a href="kanjistudy://word?id=ENTRY_ID"><ruby>kanji<rt>reading</rt></ruby>suffix</a>
- * The target word also wraps its anchor in <b>...</b>.
- * Particles, punctuation, and tokens without a JMdict id render as plain
- * text (with ruby only if they contain kanji).
+ *   <a href="..."><ruby>char<rt>reading</rt></ruby></a>
+ * The target word is wrapped in <span class="target-word">.
+ * Particles, punctuation, and tokens without a dictionary id render as plain
+ * text with ruby annotation only.
+ *
+ * Link targets:
+ *   Japanese, KS mode:  kanjistudy://word?id=ENTRY_ID
+ *   Japanese, Jisho:    https://jisho.org/search/WORD
+ *   Chinese, KS mode:   kanjistudy://word?id=ENTRY_ID
+ *   Chinese, MDBG:      https://www.mdbg.net/chinese/dictionary?word=WORD
  */
 object SentenceHtmlBuilder {
 
     data class TokenWithEntry(val token: Token, val entryId: Long?)
 
-    fun build(tokens: List<TokenWithEntry>, targetEntryId: Long?): String {
+    fun build(
+        tokens: List<TokenWithEntry>,
+        targetEntryId: Long?,
+        useKanjiStudyLinks: Boolean = false,
+        isChinese: Boolean = false,
+    ): String {
         val sb = StringBuilder()
         for ((token, entryId) in tokens) {
             val isTarget = entryId != null && entryId == targetEntryId
-            val renderable = renderToken(token, entryId)
+            val renderable = renderToken(token, entryId, useKanjiStudyLinks, isChinese)
             if (isTarget) {
-                // CSS-class wrapper instead of <b>: the card stylesheet renders
-                // the target word in primary red (matching the in-app color)
-                // and the rest of the sentence in default body color, so the
-                // target stands out without bolding.
                 sb.append("<span class=\"target-word\">")
                     .append(renderable)
                     .append("</span>")
@@ -36,26 +45,68 @@ object SentenceHtmlBuilder {
         return sb.toString()
     }
 
-    private fun renderToken(token: Token, entryId: Long?): String {
-        val body = rubyOrPlain(token)
+    private fun renderToken(
+        token: Token,
+        entryId: Long?,
+        useKanjiStudyLinks: Boolean,
+        isChinese: Boolean,
+    ): String {
+        val body = rubyOrPlain(token, isChinese)
         return when {
             token.partOfSpeech == PartOfSpeech.PARTICLE -> body
             token.partOfSpeech == PartOfSpeech.PUNCTUATION -> body
-            entryId != null -> "<a href=\"kanjistudy://word?id=$entryId\">$body</a>"
+            entryId != null -> {
+                val href = when {
+                    useKanjiStudyLinks && !isChinese -> "kanjistudy://word?id=$entryId"
+                    isChinese -> {
+                        val encoded = java.net.URLEncoder.encode(token.dictionaryForm, "UTF-8")
+                        "https://www.mdbg.net/chinese/dictionary?page=worddict&wdrst=0&wdqb=$encoded"
+                    }
+                    else -> {
+                        val encoded = java.net.URLEncoder.encode(token.dictionaryForm, "UTF-8")
+                        "https://jisho.org/search/$encoded"
+                    }
+                }
+                "<a href=\"$href\">$body</a>"
+            }
             else -> body
         }
     }
 
-    private fun rubyOrPlain(token: Token): String {
+    private fun rubyOrPlain(token: Token, isChinese: Boolean): String {
         val surface = token.surface
         if (surface.isBlank()) return ""
         if (!surface.any { it.isKanji() }) return surface.htmlEscape()
-        // Build ruby per kanji run, mirroring FuriganaBuilder's logic but with
-        // <ruby>/<rt> markup instead of bracket notation.
-        return buildRuby(surface, token.reading)
+        return if (isChinese) {
+            buildPinyinRuby(surface, token.reading)
+        } else {
+            buildJapaneseRuby(surface, token.reading)
+        }
     }
 
-    private fun buildRuby(surface: String, reading: String): String {
+    // ── Chinese path ─────────────────────────────────────────────────────────
+
+    /** Distributes space-separated pinyin syllables across CJK characters. */
+    private fun buildPinyinRuby(surface: String, pinyinMarks: String): String {
+        if (pinyinMarks.isBlank()) return surface.htmlEscape()
+        val syllables = pinyinMarks.trim().split(' ').filter { it.isNotEmpty() }
+        val out = StringBuilder()
+        var syllableIdx = 0
+        for (c in surface) {
+            if (c.isKanji()) {
+                val syllable = syllables.getOrElse(syllableIdx++) { "" }
+                out.append("<ruby>").append(c.toString().htmlEscape())
+                    .append("<rt>").append(syllable.htmlEscape()).append("</rt></ruby>")
+            } else {
+                out.append(c.toString().htmlEscape())
+            }
+        }
+        return out.toString()
+    }
+
+    // ── Japanese path (unchanged) ─────────────────────────────────────────────
+
+    private fun buildJapaneseRuby(surface: String, reading: String): String {
         if (reading.isBlank()) return surface.htmlEscape()
         val out = StringBuilder()
         var i = 0

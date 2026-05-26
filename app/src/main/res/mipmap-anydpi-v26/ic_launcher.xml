@@ -4,5 +4,5 @@
          the launcher's circular/squircle mask trims pure parchment instead
          of leaving a hard color edge. -->
     <background android:drawable="@color/surface_parchment" />
-    <foreground android:drawable="@drawable/ic_launcher_foreground" />
+    <foreground android:drawable="@drawable/simple_icon" />
 </adaptive-icon>

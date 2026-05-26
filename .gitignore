@@ -34,3 +34,20 @@ tools/jmdict-builder/bin/
 
 # --- Dev screenshots in repo root ---
 /screen*.png
+
+# --- Python artifacts ---
+__pycache__/
+*.pyc
+
+# --- Anki deck outputs (regenerable) ---
+*.apkg
+
+# --- CC-CEDICT source data (downloadable from MDBG, large) ---
+cedict.zip
+cedict_ts.u8
+
+# --- Generated SQLite databases (rebuild via scripts/) ---
+app/src/main/assets/cedict.db
+
+# --- Script run logs ---
+*_log.txt
