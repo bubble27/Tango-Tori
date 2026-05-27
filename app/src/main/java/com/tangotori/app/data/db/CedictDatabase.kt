@@ -21,9 +21,11 @@ object CedictAsset {
     private const val ASSET_NAME = "cedict.db"
 
     fun open(context: Context): SQLiteDatabase? = try {
-        context.assets.open(ASSET_NAME).close()        // verify asset exists
+        // noCompress "db" in build.gradle ensures the asset is uncompressed,
+        // so openFd works and returns the true length for staleness detection.
+        val assetLength = context.assets.openFd(ASSET_NAME).use { it.length }
         val dbFile = context.getDatabasePath(ASSET_NAME)
-        if (!dbFile.exists() || dbFile.length() == 0L) {
+        if (!dbFile.exists() || dbFile.length() != assetLength) {
             dbFile.parentFile?.mkdirs()
             context.assets.open(ASSET_NAME).use { src ->
                 FileOutputStream(dbFile).use { dst -> src.copyTo(dst) }

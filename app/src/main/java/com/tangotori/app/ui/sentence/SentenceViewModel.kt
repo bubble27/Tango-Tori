@@ -6,13 +6,17 @@ import androidx.lifecycle.viewModelScope
 import com.tangotori.app.data.IncomingSentenceBus
 import com.tangotori.app.data.anki.AnkiCardRepository
 import com.tangotori.app.data.anki.AnkiPreferences
+import com.tangotori.app.data.compound.CompoundMeaningRepository
+import com.tangotori.app.data.compound.MeaningResult
 import com.tangotori.app.data.anki.DefaultDeck
 import com.tangotori.app.data.db.JmdictDao
 import com.tangotori.app.domain.models.DictEntry
 import com.tangotori.app.domain.models.Language
 import com.tangotori.app.domain.models.PartOfSpeech
 import com.tangotori.app.domain.models.Token
+import com.tangotori.app.domain.usecases.ChineseLookupOutcome
 import com.tangotori.app.domain.usecases.ChineseLookupUseCase
+import com.tangotori.app.domain.usecases.LookupResult
 import com.tangotori.app.domain.usecases.ChineseTokenizerUseCase
 import com.tangotori.app.domain.usecases.CreateCardUseCase
 import com.tangotori.app.data.cedict.CedictRepository
@@ -45,6 +49,10 @@ data class EntryLookup(
     val loading: Boolean = false,
     val entries: List<DictEntry>? = null,
     val error: String? = null,
+    val isFallbackSplit: Boolean = false,
+    val subUnits: List<LookupResult> = emptyList(),
+    /** null = fetch in flight; non-null = result received */
+    val compoundMeaningResult: MeaningResult? = null,
 )
 
 data class DeckPickerState(
@@ -99,6 +107,7 @@ class SentenceViewModel @Inject constructor(
     private val incomingBus: IncomingSentenceBus,
     private val jmdictDao: JmdictDao,
     private val cedictRepo: CedictRepository,
+    private val compoundMeaningRepo: CompoundMeaningRepository,
     private val savedState: SavedStateHandle,
 ) : ViewModel() {
 
@@ -284,20 +293,42 @@ class SentenceViewModel @Inject constructor(
         )
         viewModelScope.launch {
             val lang = _state.value.language
-            val result = runCatching {
+            val newLookup = runCatching {
                 when (lang) {
-                    Language.JAPANESE -> lookup(token)
+                    Language.JAPANESE -> {
+                        val entries = lookup(token)
+                        EntryLookup(loading = false, entries = entries)
+                    }
                     Language.CHINESE_SIMPLIFIED,
-                    Language.CHINESE_TRADITIONAL -> chineseLookup(token)
+                    Language.CHINESE_TRADITIONAL -> {
+                        when (val outcome = chineseLookup.lookupWithFallback(token)) {
+                            is ChineseLookupOutcome.Direct ->
+                                EntryLookup(loading = false, entries = outcome.entries)
+                            is ChineseLookupOutcome.FallbackSplit ->
+                                EntryLookup(
+                                    loading = false,
+                                    isFallbackSplit = true,
+                                    subUnits = outcome.subUnits,
+                                )
+                        }
+                    }
                 }
-            }
-            val newLookup = result.fold(
-                onSuccess = { EntryLookup(loading = false, entries = it) },
-                onFailure = { EntryLookup(loading = false, error = it.message) },
-            )
+            }.getOrElse { EntryLookup(loading = false, error = it.message) }
             _state.value = _state.value.copy(
                 entries = _state.value.entries + (index to newLookup),
             )
+            // Fetch compound meaning asynchronously after the card is visible.
+            if (newLookup.isFallbackSplit) {
+                launch {
+                    val result = compoundMeaningRepo.fetchMeaning(token.dictionaryForm, newLookup.subUnits)
+                    val current = _state.value.entries[index] ?: return@launch
+                    _state.value = _state.value.copy(
+                        entries = _state.value.entries + (index to current.copy(
+                            compoundMeaningResult = result,
+                        )),
+                    )
+                }
+            }
         }
     }
 
@@ -402,14 +433,19 @@ class SentenceViewModel @Inject constructor(
             val lang = _state.value.language
             val isChinese = lang != Language.JAPANESE
             val sentenceTokens = _state.value.tokens.map { t ->
-                val entryId = if (isLinkableToken(t)) {
-                    runCatching {
+                val entryId = when {
+                    !isLinkableToken(t) -> null
+                    // Use the card's own entry.id for the target token so that
+                    // compound words (whose synthetic id has no DB row) are still
+                    // highlighted correctly in the sentence.
+                    t.dictionaryForm == entry.headword -> entry.id
+                    else -> runCatching {
                         when (lang) {
                             Language.JAPANESE -> lookup(t).firstOrNull()?.id
                             else -> chineseLookup(t).firstOrNull()?.id
                         }
                     }.getOrNull()
-                } else null
+                }
                 SentenceHtmlBuilder.TokenWithEntry(t, entryId)
             }
             val card = createCard.buildCard(
@@ -443,10 +479,6 @@ class SentenceViewModel @Inject constructor(
         _state.value = _state.value.copy(linkToKanjiStudy = next)
     }
 
-    private fun isLinkableToken(t: Token): Boolean = when (t.partOfSpeech) {
-        PartOfSpeech.PUNCTUATION,
-        PartOfSpeech.PARTICLE,
-        PartOfSpeech.AUXILIARY_VERB -> false
-        else -> true
-    }
+    private fun isLinkableToken(t: Token): Boolean =
+        t.partOfSpeech != PartOfSpeech.PUNCTUATION
 }

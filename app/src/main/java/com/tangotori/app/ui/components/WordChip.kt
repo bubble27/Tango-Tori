@@ -23,6 +23,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.dp
 import com.tangotori.app.domain.models.PartOfSpeech
 import com.tangotori.app.domain.models.Token
+import com.tangotori.app.ui.theme.PosCompound
 import com.tangotori.app.ui.theme.toColor
 
 /**
@@ -47,9 +48,10 @@ fun WordChip(
     selected: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
+    isCompound: Boolean = false,
     enterDelayMillis: Int = 0,
 ) {
-    val posColor = token.partOfSpeech.toColor()
+    val posColor = if (isCompound) PosCompound else token.partOfSpeech.toColor()
     val deemphasized = token.partOfSpeech == PartOfSpeech.PARTICLE ||
             token.partOfSpeech == PartOfSpeech.AUXILIARY_VERB
     val alpha = if (deemphasized) 0.55f else 1f

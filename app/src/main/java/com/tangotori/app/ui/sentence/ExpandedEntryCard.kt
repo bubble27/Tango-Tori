@@ -5,6 +5,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -40,20 +41,28 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.tangotori.app.data.compound.MeaningResult
 import com.tangotori.app.domain.models.DictEntry
+import com.tangotori.app.domain.models.Gloss
+import com.tangotori.app.domain.models.KanjiForm
 import com.tangotori.app.domain.models.PartOfSpeech
+import com.tangotori.app.domain.models.Reading
+import com.tangotori.app.domain.models.Sense
 import com.tangotori.app.domain.models.Token
 import com.tangotori.app.domain.util.JmdictDialectLabels
 import com.tangotori.app.domain.util.JmdictFieldLabels
 import com.tangotori.app.domain.util.JmdictMiscLabels
+import com.tangotori.app.domain.usecases.LookupResult
 import com.tangotori.app.domain.util.KanjiTile
 import com.tangotori.app.domain.util.formatCodes
 import com.tangotori.app.domain.util.formatPos
+import com.tangotori.app.ui.theme.toChinesePosLabel
 import com.tangotori.app.ui.theme.toColor
 import androidx.compose.runtime.produceState
 import androidx.compose.foundation.horizontalScroll
@@ -95,6 +104,16 @@ fun ExpandedEntryCard(
         when {
             lookup == null -> { /* should not be reached when caller gates */ }
             lookup.error != null -> ErrorRow(lookup.error)
+            lookup.isFallbackSplit -> CompoundEntryCard(
+                token = token,
+                subUnits = lookup.subUnits,
+                compoundMeaningResult = lookup.compoundMeaningResult,
+                defaultDeckName = defaultDeckName,
+                isSubmitting = isSubmitting,
+                onAddToDefaultDeck = onAddToDefaultDeck,
+                onChooseDeck = onChooseDeck,
+                loadKanjiBreakdown = loadKanjiBreakdown,
+            )
             lookup.entries.isNullOrEmpty() -> EmptyRow()
             else -> EntryBody(
                 token = token,
@@ -144,7 +163,14 @@ private fun EntryBody(
 ) {
     // Multi-entry: tab strip. Preserve selection across recompositions but reset
     // when the entry list itself changes (different token, different entries).
-    var selectedIdx by rememberSaveable(entries.map { it.id }) { mutableIntStateOf(0) }
+    // CEDICT capitalizes the first pinyin syllable of proper nouns and surnames
+    // (坐（Zuò） = surname Zuo vs 坐（zuò） = to sit). Default to the first
+    // entry whose reading starts lowercase so common words win over names.
+    val defaultIdx = remember(entries) {
+        entries.indexOfFirst { it.primaryReading.firstOrNull()?.isLowerCase() == true }
+            .takeIf { it >= 0 } ?: 0
+    }
+    var selectedIdx by rememberSaveable(entries.map { it.id }) { mutableIntStateOf(defaultIdx) }
     if (entries.size > 1) {
         EntryTabs(
             entries = entries,
@@ -157,13 +183,6 @@ private fun EntryBody(
     val entry = entries[selectedIdx.coerceIn(0, entries.lastIndex)]
     EntryDetail(token = token, entry = entry, loadKanjiBreakdown = loadKanjiBreakdown)
     Spacer(Modifier.height(12.dp))
-    val isFunctionWord = token.partOfSpeech == PartOfSpeech.PARTICLE ||
-            token.partOfSpeech == PartOfSpeech.AUXILIARY_VERB
-    if (isFunctionWord) {
-        // Particles / aux verbs don't get cards — and we don't show a button
-        // saying so either, per user request. Just stop after the senses.
-        return
-    }
 
     // Inline action row: a wide primary "Add to <default deck>" button paired
     // with a small icon-only chooser to the LEFT. The icon button lets the
@@ -338,6 +357,24 @@ private fun EntryDetail(
     // label and the gloss (per Stage 2 spec / Kanji Study reference UI).
     val hasHiragana = entry.readings.any { r -> r.text.any { c -> c.code in 0x3040..0x309F } }
     val posColor = token.partOfSpeech.toColor()
+
+    // Japanese (JMdict): POS codes live on each Sense and may change between senses.
+    // Chinese (CC-CEDICT): senses never carry POS codes, so fall back to the token-level
+    // Jieba tag shown once above all glosses.
+    val hasJmdictPos = entry.senses.any { it.partOfSpeech.isNotEmpty() }
+    if (!hasJmdictPos) {
+        token.partOfSpeech.toChinesePosLabel()?.let { label ->
+            Text(
+                text = label,
+                color = posColor,
+                fontStyle = FontStyle.Italic,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Medium,
+                modifier = Modifier.padding(top = 4.dp, bottom = 2.dp),
+            )
+        }
+    }
+
     var previousPos: String? = null
     for ((idx, sense) in entry.senses.withIndex()) {
         val posLine = sense.partOfSpeech.joinToString(";")
@@ -512,7 +549,423 @@ private fun CharDetailDialog(tile: KanjiTile, onDismiss: () -> Unit) {
     )
 }
 
+// ── Compound / fallback-split card ──────────────────────────────────────────
+
+@Composable
+private fun CompoundEntryCard(
+    token: Token,
+    subUnits: List<LookupResult>,
+    compoundMeaningResult: MeaningResult?,
+    defaultDeckName: String?,
+    isSubmitting: Boolean,
+    onAddToDefaultDeck: (Token, DictEntry) -> Unit,
+    onChooseDeck: (Token, DictEntry) -> Unit,
+    loadKanjiBreakdown: suspend (DictEntry) -> List<KanjiTile>,
+) {
+    val combinedPinyin = subUnits.joinToString(" ") { r ->
+        when (r) {
+            is LookupResult.Match -> preferredEntry(r.entries).primaryReading
+            is LookupResult.NoMatch -> r.token
+        }
+    }
+    if (combinedPinyin.isNotBlank()) {
+        Text(
+            combinedPinyin,
+            fontSize = 14.sp,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
+        )
+        Spacer(Modifier.height(6.dp))
+    }
+
+    // "Tango Tori Meaning" section — shimmer while loading, styled like a
+    // regular definition once received, or an error note on failure.
+    when (compoundMeaningResult) {
+        null -> {
+            BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+                val widthPx = with(LocalDensity.current) { maxWidth.toPx() }
+                val brush = shimmerBrush(widthPx)
+                Column {
+                    SkeletonBar(brush, widthFraction = 0.38f, height = 11.dp)
+                    Spacer(Modifier.height(6.dp))
+                    SkeletonBar(brush, widthFraction = 0.90f, height = 14.dp)
+                    Spacer(Modifier.height(5.dp))
+                    SkeletonBar(brush, widthFraction = 0.68f, height = 14.dp)
+                }
+            }
+        }
+        is MeaningResult.Success -> {
+            Text(
+                "Tango Tori Meaning",
+                fontSize = 11.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = MutedNoteColor,
+            )
+            Spacer(Modifier.height(4.dp))
+            compoundMeaningResult.meanings.forEachIndexed { i, meaning ->
+                Row {
+                    if (compoundMeaningResult.meanings.size > 1) {
+                        Text(
+                            "${i + 1}. ",
+                            fontSize = 14.sp,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f),
+                        )
+                    }
+                    Text(meaning, fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface)
+                }
+            }
+        }
+        is MeaningResult.NoInternet -> Text(
+            "No internet connection",
+            fontSize = 13.sp,
+            fontStyle = FontStyle.Italic,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f),
+        )
+        is MeaningResult.Failed -> Text(
+            "Meaning unavailable",
+            fontSize = 13.sp,
+            fontStyle = FontStyle.Italic,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f),
+        )
+    }
+    Spacer(Modifier.height(10.dp))
+
+    // Synthetic DictEntry for the whole compound — built once the meaning lands.
+    val compoundEntry = remember(token.dictionaryForm, combinedPinyin, compoundMeaningResult) {
+        if (compoundMeaningResult is MeaningResult.Success) {
+            DictEntry(
+                id = token.dictionaryForm.hashCode().toLong(),
+                isCommon = false,
+                jlptLevel = null,
+                kanjiForms = listOf(KanjiForm(token.dictionaryForm)),
+                readings = listOf(Reading(combinedPinyin)),
+                senses = listOf(
+                    Sense(
+                        partOfSpeech = emptyList(),
+                        glosses = compoundMeaningResult.meanings.map { Gloss(it) },
+                    )
+                ),
+            )
+        } else null
+    }
+
+    // Add compound to Anki — split button, enabled once meaning is known.
+    val primaryLabel = defaultDeckName?.let { "Add to $it" } ?: "Add to Anki deck"
+    val buttonHeight = 48.dp
+    val cornerR = 8.dp
+    var menuExpanded by remember { mutableStateOf(false) }
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.fillMaxWidth().height(buttonHeight),
+    ) {
+        Button(
+            onClick = { compoundEntry?.let { onAddToDefaultDeck(token, it) } },
+            enabled = !isSubmitting && compoundEntry != null,
+            colors = ButtonDefaults.buttonColors(
+                containerColor = MaterialTheme.colorScheme.primary,
+                contentColor = MaterialTheme.colorScheme.onPrimary,
+            ),
+            shape = RoundedCornerShape(
+                topStart = cornerR, bottomStart = cornerR,
+                topEnd = 0.dp, bottomEnd = 0.dp,
+            ),
+            modifier = Modifier.weight(1f).fillMaxHeight(),
+        ) {
+            Text(primaryLabel, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+        }
+        Spacer(Modifier.width(1.dp))
+        Box {
+            Button(
+                onClick = { menuExpanded = true },
+                enabled = !isSubmitting && compoundEntry != null,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    contentColor = MaterialTheme.colorScheme.onPrimary,
+                ),
+                shape = RoundedCornerShape(
+                    topStart = 0.dp, bottomStart = 0.dp,
+                    topEnd = cornerR, bottomEnd = cornerR,
+                ),
+                contentPadding = PaddingValues(horizontal = 14.dp),
+                modifier = Modifier.fillMaxHeight(),
+            ) {
+                Icon(Icons.Filled.MoreVert, contentDescription = "More options")
+            }
+            DropdownMenu(
+                expanded = menuExpanded,
+                onDismissRequest = { menuExpanded = false },
+            ) {
+                DropdownMenuItem(
+                    text = { Text("Choose deck") },
+                    onClick = {
+                        menuExpanded = false
+                        compoundEntry?.let { onChooseDeck(token, it) }
+                    },
+                )
+            }
+        }
+    }
+
+    Spacer(Modifier.height(12.dp))
+    HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f))
+
+    subUnits.forEachIndexed { index, result ->
+        Spacer(Modifier.height(14.dp))
+        when (result) {
+            is LookupResult.Match -> SubUnitFullCard(
+                surface = result.token,
+                entries = result.entries,
+                defaultDeckName = defaultDeckName,
+                isSubmitting = isSubmitting,
+                onAddToDefaultDeck = onAddToDefaultDeck,
+                onChooseDeck = onChooseDeck,
+                loadKanjiBreakdown = loadKanjiBreakdown,
+            )
+            is LookupResult.NoMatch -> UnknownSubUnit(result.token)
+        }
+        if (index < subUnits.lastIndex) {
+            Spacer(Modifier.height(14.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
+        }
+    }
+}
+
+@Composable
+private fun SubUnitFullCard(
+    surface: String,
+    entries: List<DictEntry>,
+    defaultDeckName: String?,
+    isSubmitting: Boolean,
+    onAddToDefaultDeck: (Token, DictEntry) -> Unit,
+    onChooseDeck: (Token, DictEntry) -> Unit,
+    loadKanjiBreakdown: suspend (DictEntry) -> List<KanjiTile>,
+) {
+    val defaultIdx = remember(entries) {
+        entries.indexOfFirst { it.primaryReading.firstOrNull()?.isLowerCase() == true }
+            .takeIf { it >= 0 } ?: 0
+    }
+    var selectedIdx by rememberSaveable(entries.map { it.id }) { mutableIntStateOf(defaultIdx) }
+    val entry = entries[selectedIdx.coerceIn(0, entries.lastIndex)]
+
+    if (entries.size > 1) {
+        EntryTabs(entries = entries, selectedIdx = selectedIdx, onSelect = { selectedIdx = it })
+        Spacer(Modifier.height(8.dp))
+    }
+
+    val subToken = remember(surface, entry.id) {
+        Token(
+            surface = surface,
+            dictionaryForm = surface,
+            reading = entry.primaryReading,
+            dictionaryReading = entry.primaryReading,
+            partOfSpeech = PartOfSpeech.NOUN,
+            rawPosTag = "",
+        )
+    }
+
+    // Headword row with HSK / Common badges
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.Top,
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Column {
+            Text(surface, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
+            if (entry.primaryReading.isNotBlank()) {
+                Text(
+                    entry.primaryReading,
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
+                )
+            }
+        }
+        SubUnitBadges(entry)
+    }
+    Spacer(Modifier.height(6.dp))
+
+    // POS label derived from gloss text — CEDICT has no POS field, but verb
+    // entries reliably start their first gloss with "to ".
+    cedictPosLabel(entry)?.let { label ->
+        val posColor = cedictPosColor(entry)
+        Text(
+            text = label,
+            color = posColor,
+            fontStyle = FontStyle.Italic,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Medium,
+            modifier = Modifier.padding(bottom = 2.dp),
+        )
+    }
+
+    // Senses
+    entry.senses.forEachIndexed { i, sense ->
+        Row {
+            Text(
+                "${i + 1}. ",
+                fontSize = 13.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f),
+            )
+            Text(
+                sense.glosses.joinToString("; ") { it.text },
+                fontSize = 13.sp,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+        }
+    }
+
+    // Hanzi breakdown tiles
+    val tilesState = produceState<List<KanjiTile>?>(initialValue = null, key1 = entry.id) {
+        value = runCatching { loadKanjiBreakdown(entry) }.getOrNull()
+    }
+    val tiles = tilesState.value
+    if (!tiles.isNullOrEmpty()) {
+        Spacer(Modifier.height(10.dp))
+        Text("Hanzi", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = MutedNoteColor)
+        Spacer(Modifier.height(6.dp))
+        KanjiBreakdownRow(tiles)
+    }
+
+    Spacer(Modifier.height(10.dp))
+
+    // Add to Anki — split button (same pattern as main cards)
+    val primaryLabel = defaultDeckName?.let { "Add to $it" } ?: "Add to Anki deck"
+    val cornerR = 8.dp
+    val buttonHeight = 44.dp
+    var menuExpanded by remember { mutableStateOf(false) }
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(buttonHeight),
+    ) {
+        Button(
+            onClick = { onAddToDefaultDeck(subToken, entry) },
+            enabled = !isSubmitting,
+            colors = ButtonDefaults.buttonColors(
+                containerColor = MaterialTheme.colorScheme.primary,
+                contentColor = MaterialTheme.colorScheme.onPrimary,
+            ),
+            shape = RoundedCornerShape(
+                topStart = cornerR, bottomStart = cornerR,
+                topEnd = 0.dp, bottomEnd = 0.dp,
+            ),
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxHeight(),
+        ) {
+            Text(primaryLabel, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+        }
+        Spacer(Modifier.width(1.dp))
+        Box {
+            Button(
+                onClick = { menuExpanded = true },
+                enabled = !isSubmitting,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    contentColor = MaterialTheme.colorScheme.onPrimary,
+                ),
+                shape = RoundedCornerShape(
+                    topStart = 0.dp, bottomStart = 0.dp,
+                    topEnd = cornerR, bottomEnd = cornerR,
+                ),
+                contentPadding = PaddingValues(horizontal = 12.dp),
+                modifier = Modifier.fillMaxHeight(),
+            ) {
+                Icon(Icons.Filled.MoreVert, contentDescription = "More options")
+            }
+            DropdownMenu(
+                expanded = menuExpanded,
+                onDismissRequest = { menuExpanded = false },
+            ) {
+                DropdownMenuItem(
+                    text = { Text("Choose deck") },
+                    onClick = {
+                        menuExpanded = false
+                        onChooseDeck(subToken, entry)
+                    },
+                )
+            }
+        }
+    }
+}
+
+private fun preferredEntry(entries: List<DictEntry>): DictEntry =
+    entries.firstOrNull { it.primaryReading.firstOrNull()?.isLowerCase() == true }
+        ?: entries.first()
+
+@Composable
+private fun SubUnitBadges(entry: DictEntry) {
+    val color = MaterialTheme.colorScheme.primary
+    Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+        entry.jlptLevel?.let { level ->
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(color.copy(alpha = 0.12f))
+                    .padding(horizontal = 5.dp, vertical = 2.dp),
+            ) {
+                Text(level, fontSize = 10.sp, fontWeight = FontWeight.SemiBold, color = color)
+            }
+        }
+        if (entry.isCommon) {
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(color.copy(alpha = 0.12f))
+                    .padding(horizontal = 5.dp, vertical = 2.dp),
+            ) {
+                Text("Common", fontSize = 10.sp, fontWeight = FontWeight.SemiBold, color = color)
+            }
+        }
+    }
+}
+
+@Composable
+private fun UnknownSubUnit(char: String) {
+    Text(
+        char,
+        fontSize = 22.sp,
+        fontWeight = FontWeight.SemiBold,
+        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f),
+    )
+    Text(
+        "(no entry found)",
+        fontSize = 12.sp,
+        fontStyle = FontStyle.Italic,
+        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f),
+    )
+}
+
 private val MutedNoteColor = Color(0xFF78909C)
+
+/**
+ * Derives a POS label from a CC-CEDICT entry's gloss text.
+ * CEDICT has no POS field; verb entries reliably open with "to ", and measure
+ * words / proper nouns are flagged parenthetically. Everything else is treated
+ * as a noun (the vast majority) and returns null so the label is omitted rather
+ * than stating the obvious.
+ */
+private fun cedictPosLabel(entry: DictEntry): String? {
+    val first = entry.senses.firstOrNull()?.glosses?.firstOrNull()?.text ?: return null
+    return when {
+        first.startsWith("to ") -> "Verb"
+        first.contains("measure word", ignoreCase = true) -> "Measure word"
+        first.contains("surname") || first.contains("given name") ||
+            first.contains("place name") -> "Proper noun"
+        else -> null
+    }
+}
+
+@Composable
+private fun cedictPosColor(entry: DictEntry): androidx.compose.ui.graphics.Color {
+    val label = cedictPosLabel(entry)
+    val posEnum = when (label) {
+        "Verb" -> PartOfSpeech.VERB
+        "Measure word" -> PartOfSpeech.CONJUNCTION_OTHER
+        "Proper noun" -> PartOfSpeech.NOUN
+        else -> PartOfSpeech.NOUN
+    }
+    return posEnum.toColor()
+}
 
 @Composable
 private fun SenseNotes(sense: com.tangotori.app.domain.models.Sense) {

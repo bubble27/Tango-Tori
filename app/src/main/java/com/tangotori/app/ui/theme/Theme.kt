@@ -52,6 +52,19 @@ fun TangoToriTheme(
     }
 }
 
+/** Human-readable POS label for Chinese tokens (from Jieba tags via [PartOfSpeech]). */
+fun PartOfSpeech.toChinesePosLabel(): String? = when (this) {
+    PartOfSpeech.NOUN            -> "Noun"
+    PartOfSpeech.VERB            -> "Verb"
+    PartOfSpeech.I_ADJECTIVE     -> "Adjective"
+    PartOfSpeech.NA_ADJECTIVE    -> "Adjective"
+    PartOfSpeech.ADVERB          -> "Adverb"
+    PartOfSpeech.PARTICLE        -> "Particle"
+    PartOfSpeech.AUXILIARY_VERB  -> "Auxiliary verb"
+    PartOfSpeech.CONJUNCTION_OTHER -> "Conjunction / Preposition"
+    PartOfSpeech.PUNCTUATION     -> null
+}
+
 fun PartOfSpeech.toColor(): Color = when (this) {
     PartOfSpeech.NOUN -> PosNoun
     PartOfSpeech.VERB -> PosVerb

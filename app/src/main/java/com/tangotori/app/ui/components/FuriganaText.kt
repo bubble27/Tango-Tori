@@ -121,20 +121,24 @@ private fun FuriganaPart(
         val furiganaPlaceable = measurables[0].measure(loose)
         val wordPlaceable = measurables[1].measure(loose)
 
-        val width = wordPlaceable.width
+        // Chip width = max(word, furigana) so that wide pinyin syllables
+        // (Chinese: "hóng" > "鸿") never overflow into the adjacent chip.
+        // For Japanese, furigana over a single kanji is rarely wider than the
+        // glyph, so this has no visible effect on Japanese layout.
+        val width = maxOf(wordPlaceable.width, furiganaPlaceable.width)
         val rowHeight = (FuriganaBandHeight + WordBandHeight).roundToPx()
 
         layout(width, rowHeight) {
-            // Furigana: bottom-aligned inside the upper band, centered above
-            // the word's horizontal midpoint. May extend past 0..width.
+            // Furigana: bottom-aligned in the upper band, centered over chip.
             val furiganaY = FuriganaBandHeight.roundToPx() - furiganaPlaceable.height
-            val furiganaX = (wordPlaceable.width - furiganaPlaceable.width) / 2
+            val furiganaX = (width - furiganaPlaceable.width) / 2
             furiganaPlaceable.place(furiganaX, furiganaY)
 
-            // Word: vertically centered in the lower band.
+            // Word: centered horizontally, vertically centered in lower band.
             val wordY = FuriganaBandHeight.roundToPx() +
                     (WordBandHeight.roundToPx() - wordPlaceable.height) / 2
-            wordPlaceable.place(0, wordY)
+            val wordX = (width - wordPlaceable.width) / 2
+            wordPlaceable.place(wordX, wordY)
         }
     }
 }

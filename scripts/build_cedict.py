@@ -21,73 +21,38 @@ import re
 import sqlite3
 import os
 import sys
+import csv
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_DIR = os.path.dirname(SCRIPT_DIR)
 CEDICT_INPUT = os.path.join(SCRIPT_DIR, "cedict_ts.u8")
-OUTPUT_DB = os.path.join(SCRIPT_DIR, "app", "src", "main", "assets", "cedict.db")
+OUTPUT_DB = os.path.join(PROJECT_DIR, "app", "src", "main", "assets", "cedict.db")
 
-# ── HSK 1-6 word lists (new 2021 standard not yet universal — using HSK 1-6) ──
-# These are the canonical HSK word lists. Simplified Chinese forms only.
+# ── HSK 2021 (3.0) word list — loaded from hsk30.csv ─────────────────────────
+# Source: https://github.com/tonghuikang/HSK-3.0-words-list
+# 11 000+ words across levels 1-7 (level 7 = combined HSK 7-9).
 
 HSK_WORDS: dict[str, str] = {}
 
-HSK_1 = """
-一 二 三 四 五 六 七 八 九 十 零 百 千 万 人 什么 不 的 是 我 你 他 她 它 我们 你们 他们 她们 这 那
-里 上 下 有 没有 大 小 多 少 好 吃 喝 看 听 说 来 去 在 和 也 都 很 吗 呢 啊 嗯 对 不对 中国 北京
-学生 老师 朋友 妈妈 爸爸 哥哥 姐姐 弟弟 妹妹 儿子 女儿 先生 小姐 家 学校 工作 汉语 中文 英文
-今天 明天 昨天 年 月 日 星期 时 分 钱 块 毛 分 高兴 谢谢 再见 你好 不客气 对不起 没关系
-""".split()
+_HSK_CSV = os.path.join(SCRIPT_DIR, "hsk30.csv")
+if not os.path.exists(_HSK_CSV):
+    print(f"ERROR: HSK word list not found at:\n  {_HSK_CSV}")
+    print("Download it from:")
+    print("  https://raw.githubusercontent.com/tonghuikang/HSK-3.0-words-list/main/chinese_words.csv")
+    print("Save it as hsk30.csv next to this script, then re-run.")
+    sys.exit(1)
 
-HSK_2 = """
-一下 一点 一起 一直 上班 上面 不但 不过 一样 东西 事情 以后 以前 出来 出去 出发 刚才 别 到 只
-告诉 回来 回去 回家 地方 城市 外面 帮助 常常 应该 快 慢 已经 开始 开门 关门 旁边 时候 没 每天
-比较 特别 真 终于 结束 终于 要 过 发现 认识 知道 觉得 喜欢 想 能 会 可以 需要 应该 打算 准备
-""".split()
-
-HSK_3 = """
-一般 一定 一共 一切 不管 不仅 不必 介绍 以为 其实 关系 其他 参加 反对 只有 叫 只要 另外 可能
-同意 向 如果 安静 完成 对面 就是 居然 情况 意思 按照 支持 方面 方法 决定 放 比较 水平 然后 经过
-经常 而且 联系 努力 放心 注意 理解 认为 邀请 除了 附近 难 容易 竟然 突然 紧张 简单 复杂 重要
-目的 共同 关于 及时 努力 或者 愿意 应该 不同 打算 计划 将来 希望 害怕 奇怪 提高
-""".split()
-
-HSK_4 = """
-一方面 不得不 之后 之前 之间 代替 以为 使 例如 体现 充分 分析 判断 到底 功能 升 卷 养成 具有
-包含 包括 参考 受到 困难 坚持 实际 实现 实验 恢复 情感 推迟 推荐 探讨 提供 效果 数量 比例 决心
-矛盾 社会 经济 统计 解决 表示 评价 证明 关注 展示 现代 结构 网络 影响 积极 积累 联系 行为 观点
-""".split()
-
-HSK_5 = """
-一旦 不妨 万一 上述 中间 专业 假设 假如 保持 促进 典型 典型 出现 制度 制造 前提 劳动 合理 国际
-在意 外观 宽广 展现 意义 推广 描述 条件 规律 规划 认可 资源 辩论 逻辑 运用 限制 风险 整体 措施
-发展 领域 阶段 非常 环境 表达 结论 综合 考虑 适当 转变 方式 策略 体系 调整 理论 分析 建立 确定
-""".split()
-
-HSK_6 = """
-一概 不言而喻 交融 体制 元素 内涵 内部 公认 共识 典型 基础 学科 宏观 对策 市场 应对 机制 模型
-框架 规范 演变 联合 视角 价值 资源 社区 取向 定性 基准 权利 趋势 维度 理念 影响因素 动态 变革
-实证 系统 分工 指导 融合 核心 激励 特征 论证 结合 文化 政策 管理 方向 解析 方案 协调 目标 功能
-""".split()
-
-for word in HSK_1:
-    HSK_WORDS[word] = "HSK 1"
-for word in HSK_2:
-    if word not in HSK_WORDS:
-        HSK_WORDS[word] = "HSK 2"
-for word in HSK_3:
-    if word not in HSK_WORDS:
-        HSK_WORDS[word] = "HSK 3"
-for word in HSK_4:
-    if word not in HSK_WORDS:
-        HSK_WORDS[word] = "HSK 4"
-for word in HSK_5:
-    if word not in HSK_WORDS:
-        HSK_WORDS[word] = "HSK 5"
-for word in HSK_6:
-    if word not in HSK_WORDS:
-        HSK_WORDS[word] = "HSK 6"
+with open(_HSK_CSV, encoding="utf-8", newline="") as _f:
+    for _row in csv.DictReader(_f):
+        _simp = _row["simplified"].strip()
+        _level = _row["level"].strip()
+        # Some entries have alternate forms separated by |; index each form.
+        for _form in _simp.split("|"):
+            _form = _form.strip()
+            if _form and _form not in HSK_WORDS:
+                HSK_WORDS[_form] = f"HSK {_level}"
 
 # ── Pinyin number → tone-mark conversion ─────────────────────────────────────
 
@@ -232,7 +197,7 @@ def build(input_path: str, output_path: str) -> None:
     conn.commit()
     conn.close()
     size_mb = os.path.getsize(output_path) / 1024 / 1024
-    print(f"Done → {output_path}  ({size_mb:.1f} MB)")
+    print(f"Done -> {output_path}  ({size_mb:.1f} MB)")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

@@ -51,3 +51,21 @@ app/src/main/assets/cedict.db
 
 # --- Script run logs ---
 *_log.txt
+
+# --- Cloudflare Worker (backend/) ---
+backend/node_modules/
+backend/.wrangler/
+
+# --- Internal docs / design specs (not for open source) ---
+HANDOFF.md
+Specs/
+specs/
+
+# --- JLPT N5 deck builder (not part of the open-source app) ---
+scripts/build_n5*.py
+scripts/add_three_forced.py
+scripts/n5_vocab_raw.csv
+scripts/hsk30.csv
+
+# --- Script output directories (generated, not source) ---
+scripts/app/

@@ -25,11 +25,15 @@ import javax.inject.Singleton
  * produce [Token]s from Chinese text. Jieba lazily loads its built-in
  * dictionary on first use (~200 ms); we serialize init under a mutex.
  *
+ * POS tags come from Jieba's own dict.txt (format: `word frequency tag`),
+ * loaded once at startup via the JAR classpath. Tags are mapped to the app's
+ * [PartOfSpeech] enum using Jieba's ICTCLAS tag set. Pattern-based rules
+ * handle words Jieba segments contextually but that aren't in dict.txt (e.g.
+ * AABB reduplications, 不A不B balanced negations).
+ *
  * [Token.reading] is set to space-separated tone-marked pinyin syllables
- * (e.g. "zhōng guó") so the existing Anki sentence builder can produce ruby
- * markup the same way it does for Japanese. [Token.dictionaryForm] == surface
- * (Chinese verbs don't conjugate in a way that requires a separate citation
- * form for dictionary lookup).
+ * (e.g. "zhōng guó") so the Anki sentence builder can produce ruby markup.
+ * [Token.dictionaryForm] == surface (Chinese verbs don't conjugate).
  */
 @Singleton
 class ChineseTokenizer @Inject constructor() {
@@ -37,9 +41,11 @@ class ChineseTokenizer @Inject constructor() {
     private val initMutex = Mutex()
     private var segmenter: JiebaSegmenter? = null
 
-    // Pre-warm jieba on a background thread the moment this singleton is
-    // created (app launch), so the dictionary is loaded before the user
-    // first switches to Chinese mode.
+    // POS lookup table built from Jieba's bundled dict.txt.
+    // Volatile so reads on Dispatchers.Default see the write from initMutex.
+    @Volatile private var posDict: HashMap<String, PartOfSpeech>? = null
+
+    // Pre-warm jieba (and the POS dict) on a background thread at app launch.
     private val warmupScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     init {
         warmupScope.launch {
@@ -57,7 +63,11 @@ class ChineseTokenizer @Inject constructor() {
         segmenter?.let { return it }
         return initMutex.withLock {
             segmenter ?: run {
-                val seg = withContext(Dispatchers.IO) { JiebaSegmenter() }
+                val seg = withContext(Dispatchers.IO) {
+                    val s = JiebaSegmenter()
+                    loadPosDict()   // piggyback on the same IO slot — dict.txt is in the same JAR
+                    s
+                }
                 segmenter = seg
                 seg
             }
@@ -74,24 +84,21 @@ class ChineseTokenizer @Inject constructor() {
         }
 
         return withContext(Dispatchers.Default) {
-            seg.process(text, JiebaSegmenter.SegMode.SEARCH).map { segToken ->
-                val surface = segToken.word
+            seg.sentenceProcess(text).map { surface ->
                 val pinyin = surfacePinyin(surface)
+                val pos = classifyPos(surface)
                 Token(
                     surface = surface,
                     dictionaryForm = surface,
                     reading = pinyin,
                     dictionaryReading = pinyin,
-                    partOfSpeech = classifyPos(surface),
+                    partOfSpeech = pos,
                     rawPosTag = "",
                 )
             }
         }
     }
 
-    /** Returns space-separated tone-marked pinyin for a surface string. For
-     *  words not in the pinyin4j database (proper nouns, foreign words), returns
-     *  an empty string. */
     private fun surfacePinyin(surface: String): String {
         return surface.mapNotNull { c ->
             val candidates = try {
@@ -105,12 +112,95 @@ class ChineseTokenizer @Inject constructor() {
     private fun classifyPos(surface: String): PartOfSpeech {
         if (surface.isNotEmpty() && surface.all { isPunctuationChar(it) })
             return PartOfSpeech.PUNCTUATION
-        if (surface in CHINESE_PARTICLES)  return PartOfSpeech.PARTICLE
-        if (surface in CHINESE_AUXILIARIES) return PartOfSpeech.AUXILIARY_VERB
-        if (surface in CHINESE_ADVERBS)    return PartOfSpeech.ADVERB
-        if (surface in CHINESE_CONJUNCTIONS) return PartOfSpeech.CONJUNCTION_OTHER
-        if (surface in CHINESE_VERBS)      return PartOfSpeech.VERB
+
+        // Primary: Jieba's own dictionary.
+        posDict?.get(surface)?.let { return it }
+
+        // Pattern fallbacks for words Jieba assembles from context but that
+        // don't have their own dict.txt entry.
+
+        // VV reduplication (走走, 看看): base char's dict tag decides verb vs adverb.
+        if (surface.length == 2 && surface[0] == surface[1] && isCjk(surface[0])) {
+            val base = posDict?.get(surface[0].toString())
+            return when (base) {
+                PartOfSpeech.VERB -> PartOfSpeech.VERB           // 走走, 看看
+                PartOfSpeech.NA_ADJECTIVE -> PartOfSpeech.ADVERB // 慢慢, 轻轻 → manner adverb
+                else -> PartOfSpeech.ADVERB
+            }
+        }
+        // AABB reduplication (安安静静, 高高兴兴) → descriptive adjective.
+        if (surface.length == 4 && surface[0] == surface[1] &&
+            surface[2] == surface[3] && surface[0] != surface[2]) return PartOfSpeech.NA_ADJECTIVE
+        // 不A不B / 没A没B (不冷不热, 不多不少) → adverb.
+        if (surface.length == 4 && surface[0] == surface[2] &&
+            (surface[0] == '不' || surface[0] == '没')) return PartOfSpeech.ADVERB
+
         return PartOfSpeech.NOUN
+    }
+
+    /**
+     * Reads Jieba's bundled dict.txt from the JAR classpath and builds the
+     * word → [PartOfSpeech] lookup table. Format per line: `word freq tag`.
+     * Called once inside [ensureReady] on Dispatchers.IO.
+     */
+    private fun loadPosDict() {
+        val dict = HashMap<String, PartOfSpeech>(120_000)
+        try {
+            val stream = JiebaSegmenter::class.java.getResourceAsStream("/dict.txt")
+                ?: run { Log.w(TAG, "dict.txt not found in Jieba JAR"); return }
+            stream.bufferedReader(Charsets.UTF_8).useLines { lines ->
+                for (line in lines) {
+                    if (line.isBlank()) continue
+                    val s1 = line.indexOf(' ')
+                    if (s1 < 0) continue
+                    val s2 = line.indexOf(' ', s1 + 1)
+                    if (s2 < 0) continue
+                    val word = line.substring(0, s1)
+                    val tag  = line.substring(s2 + 1).trimEnd()
+                    if (word.isNotEmpty() && tag.isNotEmpty()) {
+                        dict[word] = tagToPos(tag)
+                    }
+                }
+            }
+            Log.d(TAG, "Loaded ${dict.size} POS entries from Jieba dict.txt")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to load Jieba POS dict: ${e.message}")
+        }
+        posDict = dict
+    }
+
+    /**
+     * Maps Jieba's ICTCLAS tag codes to [PartOfSpeech].
+     * Reference: https://gist.github.com/luw2007/6016931 (ICTCLAS tag table)
+     */
+    private fun tagToPos(tag: String): PartOfSpeech = when (tag) {
+        // Verbs
+        "v", "vg", "vi", "vf"          -> PartOfSpeech.VERB
+        "vd"                            -> PartOfSpeech.ADVERB      // verb-as-adverb (不断地)
+        "vn"                            -> PartOfSpeech.VERB        // verbal noun — usually verb in context
+        // Adjectives
+        "a", "ag", "b", "z"            -> PartOfSpeech.NA_ADJECTIVE
+        "an"                            -> PartOfSpeech.NA_ADJECTIVE // adjectival noun
+        "ad"                            -> PartOfSpeech.ADVERB      // adjective-as-adverb
+        // Adverbs
+        "d", "dg"                       -> PartOfSpeech.ADVERB
+        "t", "tg"                       -> PartOfSpeech.ADVERB      // time words (今天, 最近)
+        "o"                             -> PartOfSpeech.ADVERB      // onomatopoeia
+        // Particles
+        "u", "ud", "ug", "uj", "ul",
+        "uv", "uz"                      -> PartOfSpeech.PARTICLE    // 的/地/得/了/着/过
+        "y"                             -> PartOfSpeech.PARTICLE    // sentence-final modal (吧/呢/啊)
+        "e"                             -> PartOfSpeech.PARTICLE    // exclamation
+        // Conjunctions / prepositions / pronouns / function words
+        "p"                             -> PartOfSpeech.CONJUNCTION_OTHER  // preposition (在/从/对)
+        "c"                             -> PartOfSpeech.CONJUNCTION_OTHER  // conjunction (和/但/如果)
+        "r", "rg"                       -> PartOfSpeech.CONJUNCTION_OTHER  // pronoun (我/你/他)
+        "f"                             -> PartOfSpeech.CONJUNCTION_OTHER  // direction word (上/下/里)
+        "s"                             -> PartOfSpeech.CONJUNCTION_OTHER  // place word
+        // Punctuation
+        "w"                             -> PartOfSpeech.PUNCTUATION
+        // Everything else → noun (includes n, nr, ns, nt, nz, ng, m, q, i, j, l, ...)
+        else                            -> PartOfSpeech.NOUN
     }
 
     private fun isPunctuationChar(c: Char): Boolean {
@@ -121,114 +211,24 @@ class ChineseTokenizer @Inject constructor() {
                c in "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"
     }
 
+    private fun isCjk(c: Char): Boolean {
+        val code = c.code
+        return code in 0x4E00..0x9FFF || code in 0x3400..0x4DBF || code in 0xF900..0xFAFF
+    }
+
+    fun singleCharToken(char: Char): Token = Token(
+        surface = char.toString(),
+        dictionaryForm = char.toString(),
+        reading = surfacePinyin(char.toString()),
+        dictionaryReading = surfacePinyin(char.toString()),
+        partOfSpeech = if (isPunctuationChar(char)) PartOfSpeech.PUNCTUATION else PartOfSpeech.NOUN,
+        rawPosTag = "",
+    )
+
     private fun charByCharFallback(text: String): List<Token> =
-        text.map { c ->
-            Token(
-                surface = c.toString(),
-                dictionaryForm = c.toString(),
-                reading = surfacePinyin(c.toString()),
-                dictionaryReading = surfacePinyin(c.toString()),
-                partOfSpeech = if (isPunctuationChar(c)) PartOfSpeech.PUNCTUATION else PartOfSpeech.NOUN,
-                rawPosTag = "",
-            )
-        }
+        text.map { c -> singleCharToken(c) }
 
     private companion object {
         const val TAG = "ChineseTokenizer"
-
-        // Structural particles (sentence-final, aspect markers). Both scripts.
-        val CHINESE_PARTICLES: Set<String> = setOf(
-            // Simplified
-            "的", "地", "得", "了", "着", "过", "吧", "嘛", "呢", "啊",
-            "哦", "哈", "嗯", "哎", "哟", "咦", "哇", "哼", "唉",
-            "吗", "啦", "呀", "呗", "嘿",
-            // Traditional equivalents
-            "著", "過", "嗎", "囉", "吶",
-        )
-
-        // Modal / auxiliary verbs and negation. Both scripts.
-        val CHINESE_AUXILIARIES: Set<String> = setOf(
-            // Simplified
-            "是", "不", "没", "没有", "会", "能", "可以", "应该", "要", "想",
-            "必须", "可能", "应", "该", "需要", "敢", "肯", "愿意", "愿",
-            "宁", "宁愿", "被", "把", "让", "叫", "使", "令",
-            // Traditional
-            "沒", "沒有", "會", "應該", "應", "該", "必須", "願意", "願",
-            "寧", "寧願",
-        )
-
-        // Adverbs (degree, frequency, time, scope). Both scripts.
-        val CHINESE_ADVERBS: Set<String> = setOf(
-            // Scope / focus
-            "就", "都", "也", "还", "又", "才", "只", "仅", "便", "即",
-            "光", "净", "单",
-            // Degree
-            "很", "非常", "太", "更", "最", "极", "挺", "比较", "相当",
-            "十分", "格外", "特别", "尤其", "稍", "稍微", "略",
-            // Time
-            "已", "已经", "曾", "曾经", "正", "正在", "将", "将要",
-            "刚", "刚刚", "刚才", "马上", "立刻", "立即", "即将",
-            "一直", "始终", "总", "总是", "往往", "常", "常常", "经常",
-            "偶尔", "有时", "忽然", "突然",
-            // Negation modifier (non-standalone)
-            "不断", "不再",
-            // Traditional equivalents
-            "還", "僅", "將", "將要", "已經", "曾經", "剛", "剛剛", "馬上",
-            "立刻", "立即", "即將", "一直", "始終", "總", "總是", "常常",
-            "經常", "偶爾", "有時", "忽然", "突然",
-            "不斷", "不再",
-        )
-
-        // Conjunctions and prepositions. Both scripts.
-        val CHINESE_CONJUNCTIONS: Set<String> = setOf(
-            // Coordinating
-            "和", "与", "及", "以及", "或", "或者", "而", "而且", "并", "并且",
-            // Subordinating
-            "因为", "所以", "但是", "虽然", "如果", "虽", "但", "只要", "只有",
-            "不但", "既然", "尽管", "即使", "否则", "不过", "可是", "然而",
-            "除非", "无论", "不管", "由于", "为了", "对于", "关于", "至于",
-            // Prepositions / coverbs
-            "在", "从", "向", "往", "对", "跟", "给", "比", "于", "自",
-            "以", "用", "按", "按照", "根据", "通过",
-            // Traditional
-            "與", "以及", "或者", "並", "並且",
-            "因為", "雖然", "雖", "只要", "只有", "不但", "既然", "儘管",
-            "即使", "否則", "不過", "可是", "然而", "除非", "無論", "不管",
-            "由於", "為了", "對於", "關於", "至於",
-            "從", "對", "給", "於", "根據", "通過",
-        )
-
-        // Common verbs (single-char and frequent compounds). Both scripts.
-        val CHINESE_VERBS: Set<String> = setOf(
-            // Single-char action verbs
-            "去", "来", "做", "说", "看", "走", "想", "知", "用", "到",
-            "有", "写", "读", "学", "教", "问", "答", "听", "唱", "跑",
-            "跳", "买", "卖", "吃", "喝", "睡", "起", "坐", "站", "开",
-            "关", "进", "出", "上", "下", "回", "打", "拿", "放", "找",
-            "见", "爱", "恨", "怕", "活", "死", "生", "变", "成", "过",
-            "带", "送", "接", "推", "拉", "切", "洗", "穿", "脱",
-            // Common 2-char verbs (simplified)
-            "进行", "工作", "学习", "发现", "认为", "觉得", "需要",
-            "开始", "结束", "出现", "提供", "建立", "发展", "参加", "解决",
-            "了解", "理解", "认识", "记得", "忘记", "注意", "决定", "选择",
-            "改变", "增加", "减少", "提高", "降低", "实现", "完成",
-            "表示", "说明", "表达", "描述", "介绍", "分析",
-            "研究", "讨论", "解释", "证明", "研讨", "探讨",
-            "帮助", "支持", "反对", "同意", "拒绝", "相信", "怀疑",
-            "希望", "要求", "建议", "允许", "禁止", "保护", "破坏",
-            "创造", "设计", "制造", "生产", "使用", "管理", "控制",
-            // Traditional equivalents (where different from simplified)
-            "來", "說", "寫", "讀", "學", "聽", "買", "賣",
-            "開", "關", "進", "愛", "恨", "帶", "穿",
-            "進行", "學習", "發現", "認為", "覺得",
-            "開始", "結束", "出現", "提供", "建立", "發展", "參加", "解決",
-            "了解", "理解", "認識", "記得", "忘記", "注意", "決定", "選擇",
-            "改變", "增加", "減少", "提高", "降低", "實現", "完成",
-            "表示", "說明", "表達", "描述", "介紹", "分析",
-            "研究", "討論", "解釋", "證明", "研討", "探討",
-            "幫助", "支持", "反對", "同意", "拒絕", "相信", "懷疑",
-            "希望", "要求", "建議", "允許", "禁止", "保護", "破壞",
-            "創造", "設計", "製造", "生產", "使用", "管理", "控制",
-        )
     }
 }

@@ -1,9 +1,16 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.ksp)
     alias(libs.plugins.hilt)
+}
+
+val localProps = Properties().apply {
+    val f = rootProject.file("local.properties")
+    if (f.exists()) load(f.inputStream())
 }
 
 // Export Room schema JSON so the jmdict-builder tool can read the
@@ -25,6 +32,10 @@ android {
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }
+
+        val compoundApiUrl = localProps["COMPOUND_API_URL"]?.toString()
+            ?: "https://tango-tori-backend.REPLACE_ME.workers.dev"
+        buildConfigField("String", "COMPOUND_API_URL", "\"$compoundApiUrl\"")
     }
 
     buildTypes {
@@ -53,6 +64,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
     packaging {
         resources {
@@ -66,7 +78,7 @@ android {
     // memory-map it from filesDir later and skips a needless gzip/gunzip pass at
     // install time and on first launch.
     androidResources {
-        noCompress += listOf("dic")
+        noCompress += listOf("dic", "db")
     }
 }
 

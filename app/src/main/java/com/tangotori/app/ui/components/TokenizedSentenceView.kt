@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -44,6 +45,7 @@ fun TokenizedSentenceView(
     selectedIndex: Int?,
     onTokenClick: (Int) -> Unit,
     onTokenDoubleClick: () -> Unit,
+    compoundIndices: Set<Int> = emptySet(),
     modifier: Modifier = Modifier,
 ) {
     FlowRow(
@@ -57,17 +59,48 @@ fun TokenizedSentenceView(
         horizontalArrangement = Arrangement.spacedBy(0.dp),
         verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
-        tokens.forEachIndexed { idx, token ->
-            val delay = idx * PerTokenStaggerMs
+        // Group each word chip with its immediately trailing punctuation into a
+        // single Row so FlowRow never breaks a punctuation mark onto its own line.
+        var i = 0
+        while (i < tokens.size) {
+            val token = tokens[i]
             if (token.partOfSpeech == PartOfSpeech.PUNCTUATION) {
-                StaggeredPunctuation(text = token.surface, enterDelayMillis = delay)
+                // Leading punctuation (e.g. opening bracket) — emit standalone.
+                StaggeredPunctuation(text = token.surface, enterDelayMillis = i * PerTokenStaggerMs)
+                i++
             } else {
-                WordChip(
-                    token = token,
-                    selected = idx == selectedIndex,
-                    onClick = { onTokenClick(idx) },
-                    enterDelayMillis = delay,
-                )
+                // Collect any punctuation that immediately follows this word.
+                var j = i + 1
+                while (j < tokens.size && tokens[j].partOfSpeech == PartOfSpeech.PUNCTUATION) j++
+                val wordIdx = i
+                if (j == i + 1) {
+                    // No trailing punctuation — emit chip directly (no extra Row wrapper).
+                    WordChip(
+                        token = token,
+                        selected = wordIdx == selectedIndex,
+                        isCompound = wordIdx in compoundIndices,
+                        onClick = { onTokenClick(wordIdx) },
+                        enterDelayMillis = wordIdx * PerTokenStaggerMs,
+                    )
+                } else {
+                    // Word + trailing punctuation wrapped together so FlowRow keeps them on the same line.
+                    Row {
+                        WordChip(
+                            token = token,
+                            selected = wordIdx == selectedIndex,
+                            isCompound = wordIdx in compoundIndices,
+                            onClick = { onTokenClick(wordIdx) },
+                            enterDelayMillis = wordIdx * PerTokenStaggerMs,
+                        )
+                        for (punctIdx in i + 1 until j) {
+                            StaggeredPunctuation(
+                                text = tokens[punctIdx].surface,
+                                enterDelayMillis = punctIdx * PerTokenStaggerMs,
+                            )
+                        }
+                    }
+                }
+                i = j
             }
         }
     }

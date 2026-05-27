@@ -1,5 +1,6 @@
 package com.tangotori.app.ui.sentence
 
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
@@ -120,6 +121,11 @@ fun SentenceScreen(
     val listState = rememberLazyListState()
     val snackbarHost = remember { SnackbarHostState() }
     val context = LocalContext.current
+
+    // Back button returns to edit mode instead of exiting the app.
+    BackHandler(enabled = !state.isEditing) {
+        viewModel.startEditing()
+    }
 
     // Permission flow for AnkiDroid's READ_WRITE_DATABASE — needed both for
     // deck listing and for addNote. Resume the pending action on grant.
@@ -382,6 +388,9 @@ private fun ViewingLayout(
         modifier = Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.Top,
     ) {
+        val compoundIndices = remember(state.entries) {
+            state.entries.entries.filter { it.value.isFallbackSplit }.map { it.key }.toSet()
+        }
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -395,6 +404,7 @@ private fun ViewingLayout(
                 selectedIndex = state.selectedIndex,
                 onTokenClick = onChipTapped,
                 onTokenDoubleClick = onStartEditing,
+                compoundIndices = compoundIndices,
             )
         }
         if (state.isTokenizing) {
@@ -719,9 +729,9 @@ private fun WordList(
                 animationFinished = animationFinished,
                 focused = isFocused,
                 expanded = isExpanded,
-                // Lookup is needed for badges (when focused, in the colored
-                // header) AND for the body (when expanded).
-                lookup = if (isFocused || isExpanded) entries[absIdx] else null,
+                // Lookup is always passed so compound badges can show in the
+                // unfocused header (body rendering is still gated by isExpanded).
+                lookup = entries[absIdx],
                 defaultDeckName = defaultDeckName,
                 isSubmittingCard = isSubmittingCard,
                 linkToKanjiStudy = linkToKanjiStudy,
@@ -899,6 +909,9 @@ private fun WordListItem(
                 if (headerEntry != null) {
                     Spacer(Modifier.width(10.dp))
                     BadgeRow(headerEntry)
+                } else if (lookup?.isFallbackSplit == true && lookup.subUnits.size > 1) {
+                    Spacer(Modifier.width(10.dp))
+                    CompoundBadge(count = lookup.subUnits.size, focused = focused)
                 }
             }
         }
@@ -1103,7 +1116,7 @@ private fun EntrySkeletonBody() {
 }
 
 @Composable
-private fun SkeletonBar(
+internal fun SkeletonBar(
     brush: Brush,
     widthFraction: Float,
     height: Dp,
@@ -1120,7 +1133,7 @@ private fun SkeletonBar(
 
 /** A gradient sweep that moves left-to-right on an infinite loop. */
 @Composable
-private fun shimmerBrush(widthPx: Float): Brush {
+internal fun shimmerBrush(widthPx: Float): Brush {
     val transition = rememberInfiniteTransition(label = "shimmer")
     val x by transition.animateFloat(
         initialValue = -widthPx,
@@ -1204,6 +1217,20 @@ private fun LanguageToggle(
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun CompoundBadge(count: Int, focused: Boolean = true) {
+    val fg = if (focused) MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.85f)
+             else MaterialTheme.colorScheme.primary
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(4.dp))
+            .background(fg.copy(alpha = 0.15f))
+            .padding(horizontal = 6.dp, vertical = 2.dp),
+    ) {
+        Text("×$count", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = fg)
     }
 }
 
