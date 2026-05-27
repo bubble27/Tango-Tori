@@ -3,11 +3,11 @@
 Android app for Japanese and Chinese learners. Paste or share a sentence; Tango Tori tokenizes it, looks each word up in a bundled dictionary, and lets you turn any word into an AnkiDroid card with one tap.
 
 - **Japanese** — Sudachi tokenizer · JMdict + KANJIDIC · furigana · kanji breakdown · Jisho / KanjiStudy links
-- **Chinese** — jieba tokenizer · CC-CEDICT · tone-marked pinyin · hanzi breakdown · MDBG links
+- **Chinese** — jieba tokenizer · CC-CEDICT · tone-marked pinyin · hanzi breakdown · MDBG links · AI meanings for compound words
 
 Language is detected automatically on paste or share.
 
-Stack: Kotlin 2.0 · Jetpack Compose · Hilt · Room · Sudachi 0.7.5 · jieba-analysis · AnkiDroid public API.
+Stack: Kotlin 2.0 · Jetpack Compose · Hilt · Room · Sudachi 0.7.5 · jieba-analysis · AnkiDroid public API · Cloudflare Workers.
 
 ## Download
 
@@ -25,15 +25,16 @@ app/
     data/db/              Room entities + DAOs (JMdict, KANJIDIC, CC-CEDICT)
     data/jmdict/          JMdict lookup repository
     data/cedict/          CC-CEDICT lookup repository
+    data/compound/        AI compound-meaning API client (Cloudflare Worker)
     data/anki/            AnkiDroid integration + card target repo
     domain/models/        Language enum (JAPANESE / CHINESE)
     domain/util/          HTML builders — furigana, kanji/hanzi breakdown, pinyin, sentence
     domain/usecases/      TokenizeSentence, LookupWord, ChineseLookup, CreateCard
     ui/sentence/          Sentence screen, ViewModel, expanded entry card
     ui/components/        FuriganaText, WordChip, TokenizedSentenceView
-scripts/                  Python tools — Anki deck builder, CC-CEDICT DB builder, tango_tori API
+scripts/                  Python tools — CC-CEDICT DB builder, tango_tori API
 tools/jmdict-builder/     JVM Gradle subproject — builds the bundled JMdict DB
-Specs/                    Design specs and stage feedback docs
+backend/                  Cloudflare Worker — compound-meaning AI endpoint (Claude Haiku)
 ```
 
 ## Build
@@ -91,9 +92,28 @@ This creates `app/src/main/assets/cedict.db`.
 
 1. **Paste / share a sentence** — accepts text via the input field or the Android share sheet. Language is auto-detected; toggle manually with the flag button.
 2. **Tokenization** — Sudachi (Japanese) or jieba (Chinese) splits the sentence. Chips render inline with furigana / pinyin above each character group and a POS-color underline.
-3. **Dictionary lookup** — tap a chip or word-list row to expand: numbered senses, POS, JLPT badge (Japanese), readings, alternate forms, multi-entry tabs for disambiguation.
-4. **Character breakdown** — the expanded card shows a hanzi/kanji tile row. Tap any tile for a full popup with all meanings and the character's reading.
-5. **Anki card creation** — *Add to default deck* or *Choose specific deck*. Cards use the **Tango Tori v5** note type with fields for word, ruby, meaning HTML, sentence HTML with highlight, character breakdown, and tags. Japanese cards include Jisho/KanjiStudy links; Chinese cards include an MDBG link.
+3. **POS coloring** — each word chip is color-coded by part of speech (verb, noun, adjective, particle, etc.). Chinese POS is resolved from Jieba's own ~120k-entry dictionary. Compound words (multi-character words not in CC-CEDICT, split for lookup) get a distinct steel-blue color.
+4. **Dictionary lookup** — tap a chip or word-list row to expand: numbered senses, POS label, JLPT badge (Japanese), readings, alternate forms, multi-entry tabs for disambiguation.
+5. **AI meanings for compound words** — Chinese words not found in CC-CEDICT fetch a concise AI-generated meaning from the backend Cloudflare Worker (Claude Haiku with prompt caching and per-device rate limiting).
+6. **Character breakdown** — the expanded card shows a hanzi/kanji tile row. Tap any tile for a full popup with all meanings and the character's reading.
+7. **Anki card creation** — *Add to default deck* or *Choose specific deck*. Cards use the **Tango Tori v5** note type with fields for word, ruby, meaning HTML, sentence HTML with highlight, character breakdown, and tags. Japanese cards include Jisho/KanjiStudy links; Chinese cards include an MDBG link.
+8. **Back button** — pressing the Android back button while viewing results returns to the text-edit screen instead of exiting the app.
+
+---
+
+## Backend (Cloudflare Worker)
+
+`backend/` contains the Cloudflare Worker that serves AI-generated meanings for Chinese compound words. It uses Claude Haiku with prompt caching, a D1 SQLite cache to avoid repeat API calls, and per-device rate limiting.
+
+Deploy with [Wrangler](https://developers.cloudflare.com/workers/wrangler/):
+
+```bash
+cd backend
+npm install
+npx wrangler deploy
+```
+
+The worker URL goes into `local.properties` as `COMPOUND_API_URL=https://your-worker.workers.dev/meaning` — the app reads it at build time via `BuildConfig.COMPOUND_API_URL`.
 
 ---
 
