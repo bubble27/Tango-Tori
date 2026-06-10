@@ -19,6 +19,15 @@ private val LightColors = lightColorScheme(
     onBackground = OnSurfaceLight,
     secondary = LogoRed,
     onSecondary = OnPrimary,
+    // Surface container hierarchy — warm parchment tones so dialogs, menus,
+    // segmented toggles, and dropdowns all stay on-palette instead of using
+    // Material3's default grey.
+    surfaceVariant = HeaderTintLight,            // language toggle bg, chips
+    onSurfaceVariant = OnSurfaceLight,
+    surfaceContainer = BodyTintLight,            // dropdown menu bg
+    surfaceContainerLow = SurfaceLight,
+    surfaceContainerHigh = HeaderTintLight,      // AlertDialog bg
+    surfaceContainerHighest = HeaderTintLight,
 )
 
 private val DarkColors = darkColorScheme(
@@ -30,6 +39,12 @@ private val DarkColors = darkColorScheme(
     onBackground = OnSurfaceDark,
     secondary = LogoRed,
     onSecondary = OnPrimary,
+    surfaceVariant = HeaderTintDark,
+    onSurfaceVariant = OnSurfaceDark,
+    surfaceContainer = BodyTintDark,
+    surfaceContainerLow = SurfaceDark,
+    surfaceContainerHigh = HeaderTintDark,
+    surfaceContainerHighest = HeaderTintDark,
 )
 
 @Composable

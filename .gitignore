@@ -9,6 +9,7 @@ local.properties
 captures/
 .externalNativeBuild/
 .cxx/
+Anki JLPT/
 
 # --- Build outputs / signing ---
 *.apk

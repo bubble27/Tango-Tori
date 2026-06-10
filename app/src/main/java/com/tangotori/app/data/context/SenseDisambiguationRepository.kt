@@ -1,0 +1,109 @@
+package com.tangotori.app.data.context
+
+import com.tangotori.app.BuildConfig
+import com.tangotori.app.data.compound.DeviceIdProvider
+import com.tangotori.app.domain.models.DictEntry
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
+import java.net.HttpURLConnection
+import java.net.URL
+import java.net.UnknownHostException
+import javax.inject.Inject
+import javax.inject.Singleton
+
+/**
+ * Result of asking the backend which dictionary sense fits the sentence context.
+ * [entryIndex]/[senseIndex] point into the [DictEntry] list passed to
+ * [SenseDisambiguationRepository.disambiguate]; [meaning] is a short contextual
+ * gloss generated for the word as used in the sentence.
+ */
+sealed class DisambiguationResult {
+    data class Success(
+        val entryIndex: Int,
+        val senseIndex: Int,
+        val meaning: String,
+    ) : DisambiguationResult()
+    data object NoInternet : DisambiguationResult()
+    data object Failed : DisambiguationResult()
+}
+
+/**
+ * Picks the most relevant meaning of a word given the sentence it appears in
+ * (word-sense disambiguation), via the Cloudflare Worker's `/disambiguate`
+ * endpoint. Mirrors [com.tangotori.app.data.compound.CompoundMeaningRepository].
+ */
+@Singleton
+class SenseDisambiguationRepository @Inject constructor(
+    private val deviceIdProvider: DeviceIdProvider,
+) {
+    /**
+     * @param language "ja" or "zh".
+     * @param entries the candidate entries (homographs) in the order they're
+     *   displayed; the returned indices reference this list.
+     */
+    suspend fun disambiguate(
+        language: String,
+        word: String,
+        sentence: String,
+        entries: List<DictEntry>,
+    ): DisambiguationResult = withContext(Dispatchers.IO) {
+        // Flatten (entry, sense) → numbered candidates, keeping a map back to the
+        // entry/sense indices so we can translate the chosen id.
+        data class Cand(val id: Int, val entryIndex: Int, val senseIndex: Int)
+        val candidates = JSONArray()
+        val map = mutableListOf<Cand>()
+        var id = 1
+        entries.forEachIndexed { ei, entry ->
+            entry.senses.forEachIndexed { si, sense ->
+                val gloss = sense.glosses.joinToString("; ") { it.text }
+                if (gloss.isBlank()) return@forEachIndexed
+                candidates.put(JSONObject().apply {
+                    put("id", id)
+                    put("reading", entry.primaryReading)
+                    put("pos", sense.partOfSpeech.joinToString(","))
+                    put("gloss", gloss)
+                })
+                map.add(Cand(id, ei, si))
+                id++
+            }
+        }
+        // Nothing to disambiguate with fewer than two candidates.
+        if (map.size < 2) return@withContext DisambiguationResult.Failed
+
+        val body = JSONObject().apply {
+            put("device_id", deviceIdProvider.deviceId)
+            put("language", language)
+            put("word", word)
+            put("sentence", sentence)
+            put("candidates", candidates)
+        }.toString()
+
+        try {
+            val url = URL("${BuildConfig.COMPOUND_API_URL}/disambiguate")
+            val conn = url.openConnection() as HttpURLConnection
+            conn.requestMethod = "POST"
+            conn.setRequestProperty("Content-Type", "application/json")
+            conn.doOutput = true
+            conn.connectTimeout = 10_000
+            conn.readTimeout = 15_000
+
+            conn.outputStream.use { it.write(body.toByteArray()) }
+
+            if (conn.responseCode != 200) return@withContext DisambiguationResult.Failed
+
+            val response = conn.inputStream.bufferedReader().readText()
+            val obj = JSONObject(response)
+            val chosenId = obj.optInt("id", -1)
+            val meaning = obj.optString("meaning", "").trim()
+            val cand = map.firstOrNull { it.id == chosenId }
+            if (cand == null || meaning.isEmpty()) return@withContext DisambiguationResult.Failed
+            DisambiguationResult.Success(cand.entryIndex, cand.senseIndex, meaning)
+        } catch (_: UnknownHostException) {
+            DisambiguationResult.NoInternet
+        } catch (_: Exception) {
+            DisambiguationResult.Failed
+        }
+    }
+}

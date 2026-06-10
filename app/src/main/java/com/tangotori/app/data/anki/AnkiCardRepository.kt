@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import com.ichi2.anki.api.AddContentApi
 import com.tangotori.app.domain.models.CardData
+import com.tangotori.app.domain.models.ImageCardData
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -50,6 +51,15 @@ class AnkiCardRepository @Inject constructor(
         }.getOrElse { AddResult.Failed(it.message ?: "Unknown error") }
     }
 
+    suspend fun addImageCard(card: ImageCardData, deckId: Long): AddResult = withContext(Dispatchers.IO) {
+        runCatching {
+            val modelId = findOrCreateImageNoteType()
+            val deckName = api.getDeckName(deckId) ?: "Default"
+            val noteId = api.addNote(modelId, deckId, card.toFieldArray(), tagsForImage(card))
+            if (noteId == null) AddResult.Duplicate else AddResult.Success(deckName)
+        }.getOrElse { AddResult.Failed(it.message ?: "Unknown error") }
+    }
+
     /**
      * Tags surfaced on every note for filtering inside AnkiDroid:
      *   - `tango-tori` always (identifies cards this app created)
@@ -65,7 +75,18 @@ class AnkiCardRepository @Inject constructor(
         tags += "tango-tori"
         if (card.isCommon) tags += "common"
         if (card.jlpt.isNotBlank()) tags += card.jlpt.lowercase()
-        // CardData.partOfSpeech is the first sense's POS list joined with ", ".
+        card.partOfSpeech.split(',', ';').forEach { raw ->
+            val code = raw.trim().replace(' ', '-').lowercase()
+            if (code.isNotEmpty()) tags += code
+        }
+        return tags
+    }
+
+    private fun tagsForImage(card: ImageCardData): Set<String> {
+        val tags = LinkedHashSet<String>()
+        tags += "tango-tori"
+        if (card.isCommon) tags += "common"
+        if (card.jlpt.isNotBlank()) tags += card.jlpt.lowercase()
         card.partOfSpeech.split(',', ';').forEach { raw ->
             val code = raw.trim().replace(' ', '-').lowercase()
             if (code.isNotEmpty()) tags += code
@@ -83,6 +104,21 @@ class AnkiCardRepository @Inject constructor(
             arrayOf(FRONT_TEMPLATE),
             arrayOf(BACK_TEMPLATE),
             CARD_CSS,
+            null,
+            null,
+        )
+    }
+
+    private fun findOrCreateImageNoteType(): Long {
+        val existing = api.modelList?.entries?.firstOrNull { it.value == ImageCardData.NOTE_TYPE_NAME }
+        if (existing != null) return existing.key
+        return api.addNewCustomModel(
+            ImageCardData.NOTE_TYPE_NAME,
+            ImageCardData.FIELD_NAMES,
+            arrayOf("Card 1"),
+            arrayOf(IMAGE_FRONT_TEMPLATE),
+            arrayOf(IMAGE_BACK_TEMPLATE),
+            IMAGE_CARD_CSS,
             null,
             null,
         )
@@ -230,6 +266,127 @@ class AnkiCardRepository @Inject constructor(
             .night_mode .senses li::marker { color: #BBB; }
             .night_mode .sentence .target-word,
             .night_mode .sentence .target-word a { color: #E07B6A; }
+        """
+
+        // ── Image card ────────────────────────────────────────────────────────
+        // Same front as the sentence card — headword only, reading hidden.
+        private const val IMAGE_FRONT_TEMPLATE = """
+            <div class="card-body">
+              <div class="word-block">{{Word}}</div>
+            </div>
+        """
+
+        // Back: word with ruby → optional kanji breakdown → meanings → image
+        // → user's sentence (if they have filled it in).
+        private const val IMAGE_BACK_TEMPLATE = """
+            <div class="card-body">
+              <div class="word-block">{{WordRuby}}</div>
+              <hr>
+              {{#KanjiBreakdown}}<div class="kanji-section">{{KanjiBreakdown}}</div>
+              <hr>{{/KanjiBreakdown}}
+              <div class="meaning">{{Meaning}}</div>
+              <hr>
+              {{#Image}}<div class="image-section">{{Image}}</div>{{/Image}}
+              {{#UserSentence}}<div class="user-sentence">{{UserSentence}}</div>{{/UserSentence}}
+            </div>
+        """
+
+        // Extends the base stylesheet with image + user-sentence rules.
+        private const val IMAGE_CARD_CSS = """
+            .card {
+              font-family: -apple-system, "Hiragino Sans", "Yu Gothic UI", "Noto Sans CJK JP", sans-serif;
+              padding: 16px;
+            }
+            .card-body { text-align: center; }
+            .word-block {
+              text-align: center;
+              font-size: 56px;
+              margin: 28px 0 10px 0;
+              line-height: 1.9;
+            }
+            .word-block ruby rt {
+              font-size: 0.36em;
+              color: #5A6B75;
+              line-height: 1.0;
+              padding-bottom: 4px;
+            }
+            hr {
+              border: none;
+              border-top: 1px solid #DDD;
+              margin: 18px 0;
+            }
+            .meaning { text-align: left; }
+            .pos-label {
+              font-size: 14px;
+              color: #78909C;
+              font-style: italic;
+              margin: 10px 0 6px 0;
+            }
+            .senses {
+              padding-left: 24px;
+              margin: 0 0 10px 0;
+            }
+            .senses li {
+              font-size: 18px;
+              line-height: 1.55;
+              margin-bottom: 6px;
+            }
+            .senses li::marker { color: #999; }
+            .kanji-section {
+              display: flex;
+              flex-direction: row;
+              justify-content: center;
+              flex-wrap: wrap;
+              gap: 16px;
+              margin: 12px 0;
+            }
+            .kanji-tile {
+              display: flex;
+              flex-direction: column;
+              align-items: center;
+              min-width: 80px;
+            }
+            .kanji-reading {
+              font-size: 15px;
+              color: #5A6B75;
+              line-height: 1.0;
+              margin-bottom: 2px;
+              min-height: 18px;
+            }
+            .kanji-char { font-size: 40px; line-height: 1.0; }
+            .kanji-meaning {
+              font-size: 13px;
+              color: #999;
+              text-align: center;
+              margin-top: 4px;
+            }
+            /* Image section */
+            .image-section {
+              margin: 16px auto;
+              text-align: center;
+            }
+            .image-section img {
+              max-width: 100%;
+              max-height: 300px;
+              border-radius: 8px;
+              object-fit: contain;
+            }
+            /* User's own example sentence, written in AnkiDroid after card creation */
+            .user-sentence {
+              margin: 14px auto 8px auto;
+              font-size: 22px;
+              line-height: 1.8;
+              max-width: 92%;
+              text-align: center;
+              color: #555;
+            }
+
+            .night_mode hr { border-top-color: #444; }
+            .night_mode .pos-label,
+            .night_mode .word-block ruby rt,
+            .night_mode .kanji-reading { color: #90A4AE; }
+            .night_mode .senses li::marker { color: #BBB; }
+            .night_mode .user-sentence { color: #CCC; }
         """
     }
 }

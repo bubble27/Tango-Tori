@@ -1,16 +1,22 @@
 package com.tangotori.app.ui.sentence
 
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -27,6 +33,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -40,13 +47,21 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import com.tangotori.app.data.compound.MeaningResult
 import com.tangotori.app.domain.models.DictEntry
 import com.tangotori.app.domain.models.Gloss
@@ -62,6 +77,7 @@ import com.tangotori.app.domain.usecases.LookupResult
 import com.tangotori.app.domain.util.KanjiTile
 import com.tangotori.app.domain.util.formatCodes
 import com.tangotori.app.domain.util.formatPos
+import com.tangotori.app.ui.theme.LogoRed
 import com.tangotori.app.ui.theme.toChinesePosLabel
 import com.tangotori.app.ui.theme.toColor
 import androidx.compose.runtime.produceState
@@ -78,12 +94,25 @@ import androidx.compose.material3.TextButton
  * matched entries. If multiple entries match, a horizontal tab strip lets the
  * user disambiguate before tapping "Select this word".
  */
+/**
+ * Per-entry add-to-deck state, threaded down from the ViewModel. Drives the
+ * "creating" ripple animation and the disabled "Already added to <deck>" button.
+ */
+data class CardAddState(
+    val submittingEntryId: Long? = null,
+    val addedDecks: Map<Long, String> = emptyMap(),
+) {
+    fun isSubmitting(entryId: Long): Boolean = submittingEntryId == entryId
+    fun addedDeck(entryId: Long): String? = addedDecks[entryId]
+    val isAnySubmitting: Boolean get() = submittingEntryId != null
+}
+
 @Composable
 fun ExpandedEntryCard(
     token: Token,
     lookup: EntryLookup?,
     defaultDeckName: String?,
-    isSubmitting: Boolean,
+    cardAddState: CardAddState,
     linkToKanjiStudy: Boolean,
     onAddToDefaultDeck: (Token, DictEntry) -> Unit,
     onChooseDeck: (Token, DictEntry) -> Unit,
@@ -94,38 +123,50 @@ fun ExpandedEntryCard(
     loadKanjiBreakdown: suspend (DictEntry) -> List<KanjiTile>,
     modifier: Modifier = Modifier,
 ) {
-    // Top padding gives the senses block air below the red header bar; the
-    // bar's bottom edge would otherwise sit flush against the first POS line.
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(start = 16.dp, end = 16.dp, top = 20.dp, bottom = 14.dp),
-    ) {
-        when {
-            lookup == null -> { /* should not be reached when caller gates */ }
-            lookup.error != null -> ErrorRow(lookup.error)
-            lookup.isFallbackSplit -> CompoundEntryCard(
-                token = token,
-                subUnits = lookup.subUnits,
-                compoundMeaningResult = lookup.compoundMeaningResult,
-                defaultDeckName = defaultDeckName,
-                isSubmitting = isSubmitting,
-                onAddToDefaultDeck = onAddToDefaultDeck,
-                onChooseDeck = onChooseDeck,
-                loadKanjiBreakdown = loadKanjiBreakdown,
-            )
-            lookup.entries.isNullOrEmpty() -> EmptyRow()
-            else -> EntryBody(
-                token = token,
-                entries = lookup.entries,
-                defaultDeckName = defaultDeckName,
-                isSubmitting = isSubmitting,
-                linkToKanjiStudy = linkToKanjiStudy,
-                onAddToDefaultDeck = onAddToDefaultDeck,
-                onChooseDeck = onChooseDeck,
-                onToggleLinkStyle = onToggleLinkStyle,
-                loadKanjiBreakdown = loadKanjiBreakdown,
-            )
+    // Box wrapper so a downward "creation ripple" can sweep behind the whole
+    // card body and into the add button while a card is being submitted. Drawn
+    // first so it sits BEHIND the content (and disappears under the opaque
+    // button rather than painting over it).
+    Box(modifier = modifier.fillMaxWidth()) {
+        // Only the expanded card shows add buttons, so a global "any submitting"
+        // flag is enough to gate the card-wide ripple here.
+        CardCreationRipple(active = cardAddState.isAnySubmitting)
+
+        // Top padding gives the senses block air below the red header bar; the
+        // bar's bottom edge would otherwise sit flush against the first POS line.
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 16.dp, end = 16.dp, top = 20.dp, bottom = 14.dp),
+        ) {
+            when {
+                lookup == null -> { /* should not be reached when caller gates */ }
+                lookup.error != null -> ErrorRow(lookup.error)
+                lookup.isFallbackSplit -> CompoundEntryCard(
+                    token = token,
+                    subUnits = lookup.subUnits,
+                    compoundMeaningResult = lookup.compoundMeaningResult,
+                    defaultDeckName = defaultDeckName,
+                    cardAddState = cardAddState,
+                    onAddToDefaultDeck = onAddToDefaultDeck,
+                    onChooseDeck = onChooseDeck,
+                    loadKanjiBreakdown = loadKanjiBreakdown,
+                )
+                lookup.entries.isNullOrEmpty() -> EmptyRow()
+                else -> EntryBody(
+                    token = token,
+                    entries = lookup.entries,
+                    defaultDeckName = defaultDeckName,
+                    cardAddState = cardAddState,
+                    linkToKanjiStudy = linkToKanjiStudy,
+                    inContext = lookup.inContext,
+                    inContextLoading = lookup.inContextLoading,
+                    onAddToDefaultDeck = onAddToDefaultDeck,
+                    onChooseDeck = onChooseDeck,
+                    onToggleLinkStyle = onToggleLinkStyle,
+                    loadKanjiBreakdown = loadKanjiBreakdown,
+                )
+            }
         }
     }
 }
@@ -154,8 +195,10 @@ private fun EntryBody(
     token: Token,
     entries: List<DictEntry>,
     defaultDeckName: String?,
-    isSubmitting: Boolean,
+    cardAddState: CardAddState,
     linkToKanjiStudy: Boolean,
+    inContext: InContextSense?,
+    inContextLoading: Boolean,
     onAddToDefaultDeck: (Token, DictEntry) -> Unit,
     onChooseDeck: (Token, DictEntry) -> Unit,
     onToggleLinkStyle: () -> Unit,
@@ -171,6 +214,13 @@ private fun EntryBody(
             .takeIf { it >= 0 } ?: 0
     }
     var selectedIdx by rememberSaveable(entries.map { it.id }) { mutableIntStateOf(defaultIdx) }
+
+    // When the in-context result lands, jump to the homograph entry it chose.
+    LaunchedEffect(inContext?.entryIndex) {
+        val ei = inContext?.entryIndex
+        if (ei != null && ei in entries.indices) selectedIdx = ei
+    }
+
     if (entries.size > 1) {
         EntryTabs(
             entries = entries,
@@ -180,90 +230,50 @@ private fun EntryBody(
         Spacer(Modifier.height(8.dp))
     }
 
-    val entry = entries[selectedIdx.coerceIn(0, entries.lastIndex)]
-    EntryDetail(token = token, entry = entry, loadKanjiBreakdown = loadKanjiBreakdown)
+    val activeIdx = selectedIdx.coerceIn(0, entries.lastIndex)
+    val entry = entries[activeIdx]
+    // The contextual meaning + highlighted sense apply only to the entry the LLM
+    // actually chose; on any other homograph tab we show nothing extra.
+    val isChosenEntry = inContext != null && inContext.entryIndex == activeIdx
+    EntryDetail(
+        token = token,
+        entry = entry,
+        inContextLoading = inContextLoading && inContext == null,
+        inContextMeaning = if (isChosenEntry) inContext!!.meaning else null,
+        contextSenseIndex = if (isChosenEntry) inContext!!.senseIndex else null,
+        loadKanjiBreakdown = loadKanjiBreakdown,
+    )
     Spacer(Modifier.height(12.dp))
 
-    // Inline action row: a wide primary "Add to <default deck>" button paired
-    // with a small icon-only chooser to the LEFT. The icon button lets the
-    // user override the default for this one card without burying it under a
-    // second large button.
-    // Split-button row: wide "Add to <Deck>" on the left, square overflow on
-    // the right. They share the same height and sit flush against each other
-    // (a 1 dp hairline gap reads as a divider rather than two separate
-    // buttons). Less-rounded corners (8 dp) so the pair looks like one unit.
-    val primaryLabel = defaultDeckName?.let { "Add to $it" } ?: "Add to Anki deck"
-    val buttonHeight = 48.dp
-    val cornerR = 8.dp
-    var menuExpanded by remember { mutableStateOf(false) }
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier.fillMaxWidth().height(buttonHeight),
-    ) {
-        Button(
-            onClick = { onAddToDefaultDeck(token, entry) },
-            enabled = !isSubmitting,
-            colors = ButtonDefaults.buttonColors(
-                containerColor = MaterialTheme.colorScheme.primary,
-                contentColor = MaterialTheme.colorScheme.onPrimary,
-            ),
-            shape = RoundedCornerShape(
-                topStart = cornerR,
-                bottomStart = cornerR,
-                topEnd = 0.dp,
-                bottomEnd = 0.dp,
-            ),
-            modifier = Modifier.weight(1f).fillMaxHeight(),
-        ) {
-            Text(primaryLabel, fontWeight = FontWeight.SemiBold)
-        }
-        Spacer(Modifier.width(1.dp))
-        Box {
-            Button(
-                onClick = { menuExpanded = true },
-                enabled = !isSubmitting,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = MaterialTheme.colorScheme.primary,
-                    contentColor = MaterialTheme.colorScheme.onPrimary,
-                ),
-                shape = RoundedCornerShape(
-                    topStart = 0.dp,
-                    bottomStart = 0.dp,
-                    topEnd = cornerR,
-                    bottomEnd = cornerR,
-                ),
-                contentPadding = PaddingValues(horizontal = 14.dp),
-                modifier = Modifier.fillMaxHeight(),
-            ) {
-                Icon(
-                    imageVector = Icons.Filled.MoreVert,
-                    contentDescription = "More options",
-                )
-            }
-            DropdownMenu(
-                expanded = menuExpanded,
-                onDismissRequest = { menuExpanded = false },
-            ) {
-                DropdownMenuItem(
-                    text = { Text("Choose deck") },
-                    onClick = {
-                        menuExpanded = false
-                        onChooseDeck(token, entry)
-                    },
-                )
-                HorizontalDivider()
-                DropdownMenuItem(
-                    text = { Text("Kanji Study links") },
-                    trailingIcon = if (linkToKanjiStudy) {
-                        { Icon(Icons.Filled.Check, contentDescription = null, modifier = Modifier.size(18.dp)) }
-                    } else null,
-                    onClick = {
-                        menuExpanded = false
-                        onToggleLinkStyle()
-                    },
-                )
-            }
-        }
+    // Inline add-to-deck control: a split "Add to <Deck>" button (wide primary
+    // + overflow chooser) that morphs into a creation ripple, then a
+    // "Successfully added" flash, then a disabled "Already added to <deck>".
+    AddToDeckButton(
+        deckName = defaultDeckName,
+        entryId = entry.id,
+        cardAddState = cardAddState,
+        onAdd = { onAddToDefaultDeck(token, entry) },
+        height = 48.dp,
+        fontSize = 14.sp,
+    ) { dismiss ->
+        DropdownMenuItem(
+            text = { Text("Choose deck") },
+            onClick = {
+                dismiss()
+                onChooseDeck(token, entry)
+            },
+        )
+        HorizontalDivider()
+        DropdownMenuItem(
+            text = { Text("Kanji Study links") },
+            trailingIcon = if (linkToKanjiStudy) {
+                { Icon(Icons.Filled.Check, contentDescription = null, modifier = Modifier.size(18.dp)) }
+            } else null,
+            onClick = {
+                dismiss()
+                onToggleLinkStyle()
+            },
+        )
     }
 }
 
@@ -346,11 +356,19 @@ private fun buildTabLabels(entries: List<DictEntry>): List<String> {
 private fun EntryDetail(
     token: Token,
     entry: DictEntry,
+    inContextLoading: Boolean,
+    inContextMeaning: String?,
+    contextSenseIndex: Int?,
     loadKanjiBreakdown: suspend (DictEntry) -> List<KanjiTile>,
 ) {
     // Header (word + reading + badges) is now rendered up in WordListItem as
     // an animated colored card. This composable only handles the senses +
     // other-forms + kanji-breakdown block.
+
+    // In-context meaning section (the LLM's read of how this word is used in the
+    // current sentence), shown at the very top like the compound "Tango Tori
+    // Meaning" block.
+    InContextSection(loading = inContextLoading, meaning = inContextMeaning)
 
     // Senses — POS subtitle per group, then any misc/field/dialect notes,
     // then numbered glosses. Order matters: notes belong BETWEEN the POS
@@ -390,7 +408,10 @@ private fun EntryDetail(
             previousPos = posLine
         }
         SenseNotes(sense)
-        SenseLine(index = idx + 1, sense = sense)
+        // Highlight the contextually-relevant sense in Tango Tori red — only
+        // meaningful when there's more than one sense to choose between.
+        val highlighted = entry.senses.size > 1 && idx == contextSenseIndex
+        SenseLine(index = idx + 1, sense = sense, highlighted = highlighted)
     }
 
     // Other forms — alternate kanji writings beyond the headword. Render one
@@ -557,7 +578,7 @@ private fun CompoundEntryCard(
     subUnits: List<LookupResult>,
     compoundMeaningResult: MeaningResult?,
     defaultDeckName: String?,
-    isSubmitting: Boolean,
+    cardAddState: CardAddState,
     onAddToDefaultDeck: (Token, DictEntry) -> Unit,
     onChooseDeck: (Token, DictEntry) -> Unit,
     loadKanjiBreakdown: suspend (DictEntry) -> List<KanjiTile>,
@@ -648,61 +669,28 @@ private fun CompoundEntryCard(
         } else null
     }
 
-    // Add compound to Anki — split button, enabled once meaning is known.
-    val primaryLabel = defaultDeckName?.let { "Add to $it" } ?: "Add to Anki deck"
-    val buttonHeight = 48.dp
-    val cornerR = 8.dp
-    var menuExpanded by remember { mutableStateOf(false) }
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier.fillMaxWidth().height(buttonHeight),
-    ) {
-        Button(
-            onClick = { compoundEntry?.let { onAddToDefaultDeck(token, it) } },
-            enabled = !isSubmitting && compoundEntry != null,
-            colors = ButtonDefaults.buttonColors(
-                containerColor = MaterialTheme.colorScheme.primary,
-                contentColor = MaterialTheme.colorScheme.onPrimary,
-            ),
-            shape = RoundedCornerShape(
-                topStart = cornerR, bottomStart = cornerR,
-                topEnd = 0.dp, bottomEnd = 0.dp,
-            ),
-            modifier = Modifier.weight(1f).fillMaxHeight(),
-        ) {
-            Text(primaryLabel, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
-        }
-        Spacer(Modifier.width(1.dp))
-        Box {
-            Button(
-                onClick = { menuExpanded = true },
-                enabled = !isSubmitting && compoundEntry != null,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = MaterialTheme.colorScheme.primary,
-                    contentColor = MaterialTheme.colorScheme.onPrimary,
-                ),
-                shape = RoundedCornerShape(
-                    topStart = 0.dp, bottomStart = 0.dp,
-                    topEnd = cornerR, bottomEnd = cornerR,
-                ),
-                contentPadding = PaddingValues(horizontal = 14.dp),
-                modifier = Modifier.fillMaxHeight(),
-            ) {
-                Icon(Icons.Filled.MoreVert, contentDescription = "More options")
-            }
-            DropdownMenu(
-                expanded = menuExpanded,
-                onDismissRequest = { menuExpanded = false },
-            ) {
-                DropdownMenuItem(
-                    text = { Text("Choose deck") },
-                    onClick = {
-                        menuExpanded = false
-                        compoundEntry?.let { onChooseDeck(token, it) }
-                    },
-                )
-            }
-        }
+    // Add compound to Anki — split button, enabled once meaning is known. Its
+    // synthetic entry id is derived from the dictionary form (matches the id the
+    // ViewModel records on submit) so the "added" state lines up.
+    val compoundEntryId = remember(token.dictionaryForm) {
+        token.dictionaryForm.hashCode().toLong()
+    }
+    AddToDeckButton(
+        deckName = defaultDeckName,
+        entryId = compoundEntryId,
+        cardAddState = cardAddState,
+        enabled = compoundEntry != null,
+        onAdd = { compoundEntry?.let { onAddToDefaultDeck(token, it) } },
+        height = 48.dp,
+        fontSize = 13.sp,
+    ) { dismiss ->
+        DropdownMenuItem(
+            text = { Text("Choose deck") },
+            onClick = {
+                dismiss()
+                compoundEntry?.let { onChooseDeck(token, it) }
+            },
+        )
     }
 
     Spacer(Modifier.height(12.dp))
@@ -715,7 +703,7 @@ private fun CompoundEntryCard(
                 surface = result.token,
                 entries = result.entries,
                 defaultDeckName = defaultDeckName,
-                isSubmitting = isSubmitting,
+                cardAddState = cardAddState,
                 onAddToDefaultDeck = onAddToDefaultDeck,
                 onChooseDeck = onChooseDeck,
                 loadKanjiBreakdown = loadKanjiBreakdown,
@@ -734,7 +722,7 @@ private fun SubUnitFullCard(
     surface: String,
     entries: List<DictEntry>,
     defaultDeckName: String?,
-    isSubmitting: Boolean,
+    cardAddState: CardAddState,
     onAddToDefaultDeck: (Token, DictEntry) -> Unit,
     onChooseDeck: (Token, DictEntry) -> Unit,
     loadKanjiBreakdown: suspend (DictEntry) -> List<KanjiTile>,
@@ -826,20 +814,123 @@ private fun SubUnitFullCard(
 
     Spacer(Modifier.height(10.dp))
 
-    // Add to Anki — split button (same pattern as main cards)
-    val primaryLabel = defaultDeckName?.let { "Add to $it" } ?: "Add to Anki deck"
+    // Add to Anki — same animated split button as the main cards.
+    AddToDeckButton(
+        deckName = defaultDeckName,
+        entryId = entry.id,
+        cardAddState = cardAddState,
+        onAdd = { onAddToDefaultDeck(subToken, entry) },
+        height = 44.dp,
+        fontSize = 13.sp,
+    ) { dismiss ->
+        DropdownMenuItem(
+            text = { Text("Choose deck") },
+            onClick = {
+                dismiss()
+                onChooseDeck(subToken, entry)
+            },
+        )
+    }
+}
+
+// ── Animated add-to-deck button ─────────────────────────────────────────────
+
+private enum class AddPhase { Idle, Submitting, Success, Added }
+
+/**
+ * The add-to-deck control. Crossfades through four phases:
+ *   Idle → split "Add to <Deck>" button (wide primary + overflow chooser)
+ *   Submitting → a primary "Adding…" pill with a downward ripple sweep
+ *   Success → a brief "Successfully added ✓" flash
+ *   Added → a disabled "Already added to <deck> ✓" pill
+ * Once a card is added it cannot be re-added (the button never returns to Idle
+ * for that entry).
+ */
+@Composable
+private fun AddToDeckButton(
+    deckName: String?,
+    entryId: Long,
+    cardAddState: CardAddState,
+    onAdd: () -> Unit,
+    height: Dp,
+    fontSize: TextUnit,
+    enabled: Boolean = true,
+    menuItems: @Composable (dismiss: () -> Unit) -> Unit,
+) {
+    val isSubmitting = cardAddState.isSubmitting(entryId)
+    val addedDeck = cardAddState.addedDeck(entryId)
+
+    // Brief "Successfully added" flash once a submit completes, before settling
+    // into the persistent "Already added" state.
+    var justSucceeded by remember { mutableStateOf(false) }
+    var wasSubmitting by remember { mutableStateOf(false) }
+    LaunchedEffect(isSubmitting, addedDeck) {
+        if (wasSubmitting && !isSubmitting && addedDeck != null) {
+            justSucceeded = true
+            delay(1300)
+            justSucceeded = false
+        }
+        wasSubmitting = isSubmitting
+    }
+
+    val phase = when {
+        isSubmitting -> AddPhase.Submitting
+        justSucceeded -> AddPhase.Success
+        addedDeck != null -> AddPhase.Added
+        else -> AddPhase.Idle
+    }
+
     val cornerR = 8.dp
-    val buttonHeight = 44.dp
+    Crossfade(
+        targetState = phase,
+        animationSpec = tween(300),
+        modifier = Modifier.fillMaxWidth().height(height),
+        label = "addPhase",
+    ) { p ->
+        when (p) {
+            AddPhase.Idle -> SplitAddButton(
+                label = deckName?.let { "Add to $it" } ?: "Add to Anki deck",
+                enabled = enabled,
+                cornerR = cornerR,
+                fontSize = fontSize,
+                onAdd = onAdd,
+                menuItems = menuItems,
+            )
+            AddPhase.Submitting -> CreatingPill(cornerR = cornerR, fontSize = fontSize)
+            AddPhase.Success -> StatusPill(
+                text = "Successfully added",
+                cornerR = cornerR,
+                fontSize = fontSize,
+                container = MaterialTheme.colorScheme.primary,
+                content = MaterialTheme.colorScheme.onPrimary,
+            )
+            AddPhase.Added -> AddedButton(
+                deckName = addedDeck ?: deckName ?: "deck",
+                cornerR = cornerR,
+                fontSize = fontSize,
+                menuItems = menuItems,
+            )
+        }
+    }
+}
+
+@Composable
+private fun SplitAddButton(
+    label: String,
+    enabled: Boolean,
+    cornerR: Dp,
+    fontSize: TextUnit,
+    onAdd: () -> Unit,
+    menuItems: @Composable (dismiss: () -> Unit) -> Unit,
+) {
     var menuExpanded by remember { mutableStateOf(false) }
     Row(
         verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(buttonHeight),
+        modifier = Modifier.fillMaxSize(),
     ) {
         Button(
-            onClick = { onAddToDefaultDeck(subToken, entry) },
-            enabled = !isSubmitting,
+            onClick = onAdd,
+            enabled = enabled,
             colors = ButtonDefaults.buttonColors(
                 containerColor = MaterialTheme.colorScheme.primary,
                 contentColor = MaterialTheme.colorScheme.onPrimary,
@@ -848,17 +939,15 @@ private fun SubUnitFullCard(
                 topStart = cornerR, bottomStart = cornerR,
                 topEnd = 0.dp, bottomEnd = 0.dp,
             ),
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxHeight(),
+            modifier = Modifier.weight(1f).fillMaxHeight(),
         ) {
-            Text(primaryLabel, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+            Text(label, fontWeight = FontWeight.SemiBold, fontSize = fontSize)
         }
         Spacer(Modifier.width(1.dp))
         Box {
             Button(
                 onClick = { menuExpanded = true },
-                enabled = !isSubmitting,
+                enabled = enabled,
                 colors = ButtonDefaults.buttonColors(
                     containerColor = MaterialTheme.colorScheme.primary,
                     contentColor = MaterialTheme.colorScheme.onPrimary,
@@ -867,7 +956,7 @@ private fun SubUnitFullCard(
                     topStart = 0.dp, bottomStart = 0.dp,
                     topEnd = cornerR, bottomEnd = cornerR,
                 ),
-                contentPadding = PaddingValues(horizontal = 12.dp),
+                contentPadding = PaddingValues(horizontal = 14.dp),
                 modifier = Modifier.fillMaxHeight(),
             ) {
                 Icon(Icons.Filled.MoreVert, contentDescription = "More options")
@@ -876,16 +965,196 @@ private fun SubUnitFullCard(
                 expanded = menuExpanded,
                 onDismissRequest = { menuExpanded = false },
             ) {
-                DropdownMenuItem(
-                    text = { Text("Choose deck") },
-                    onClick = {
-                        menuExpanded = false
-                        onChooseDeck(subToken, entry)
-                    },
-                )
+                menuItems { menuExpanded = false }
             }
         }
     }
+}
+
+/** Submitting state — a plain primary "Adding…" pill. The motion comes from the
+ *  card-wide ripple sweeping down into it, not from the button itself. */
+@Composable
+private fun CreatingPill(cornerR: Dp, fontSize: TextUnit) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .clip(RoundedCornerShape(cornerR))
+            .background(MaterialTheme.colorScheme.primary),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            "Adding…",
+            color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.9f),
+            fontWeight = FontWeight.SemiBold,
+            fontSize = fontSize,
+        )
+    }
+}
+
+/** Persistent "added" state — a muted "Already added to <deck>" pill on the
+ *  left, but the overflow chooser stays live on the right so the user can still
+ *  add this word to a *different* deck. */
+@Composable
+private fun AddedButton(
+    deckName: String,
+    cornerR: Dp,
+    fontSize: TextUnit,
+    menuItems: @Composable (dismiss: () -> Unit) -> Unit,
+) {
+    val muted = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
+    val accent = MaterialTheme.colorScheme.primary
+    var menuExpanded by remember { mutableStateOf(false) }
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.fillMaxSize(),
+    ) {
+        Row(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxHeight()
+                .clip(
+                    RoundedCornerShape(
+                        topStart = cornerR, bottomStart = cornerR,
+                        topEnd = 0.dp, bottomEnd = 0.dp,
+                    ),
+                )
+                .background(muted),
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                Icons.Filled.Check,
+                contentDescription = null,
+                tint = accent,
+                modifier = Modifier.size(18.dp),
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(
+                "Already added to $deckName",
+                color = accent,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = fontSize,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Spacer(Modifier.width(1.dp))
+        Box {
+            Button(
+                onClick = { menuExpanded = true },
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = muted,
+                    contentColor = accent,
+                ),
+                shape = RoundedCornerShape(
+                    topStart = 0.dp, bottomStart = 0.dp,
+                    topEnd = cornerR, bottomEnd = cornerR,
+                ),
+                contentPadding = PaddingValues(horizontal = 14.dp),
+                modifier = Modifier.fillMaxHeight(),
+            ) {
+                Icon(Icons.Filled.MoreVert, contentDescription = "Add to another deck")
+            }
+            DropdownMenu(
+                expanded = menuExpanded,
+                onDismissRequest = { menuExpanded = false },
+            ) {
+                menuItems { menuExpanded = false }
+            }
+        }
+    }
+}
+
+@Composable
+private fun StatusPill(
+    text: String,
+    cornerR: Dp,
+    fontSize: TextUnit,
+    container: Color,
+    content: Color,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxSize()
+            .clip(RoundedCornerShape(cornerR))
+            .background(container),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            Icons.Filled.Check,
+            contentDescription = null,
+            tint = content,
+            modifier = Modifier.size(18.dp),
+        )
+        Spacer(Modifier.width(6.dp))
+        Text(text, color = content, fontWeight = FontWeight.SemiBold, fontSize = fontSize)
+    }
+}
+
+/** A translucent, rounded primary band that descends the card body and into
+ *  (behind) the add button while a card is being created. Single pass: it eases
+ *  down over ~1s and stops at the button — and always completes that ~1s descent
+ *  even if the add finishes sooner — then fades out in place. */
+@Composable
+private fun BoxScope.CardCreationRipple(active: Boolean) {
+    val pos = remember { Animatable(0f) }   // 0 = top, 1 = at the button
+    val alpha = remember { Animatable(0f) }
+    var running by remember { mutableStateOf(false) }
+    LaunchedEffect(active) {
+        if (active) {
+            running = true
+            pos.snapTo(0f)
+            alpha.snapTo(0f)
+            launch { alpha.animateTo(1f, animationSpec = tween(180)) }
+            // Full ~1s descent into the button, then hold there.
+            pos.animateTo(1f, animationSpec = tween(1000, easing = FastOutSlowInEasing))
+        } else if (running) {
+            // Let the band finish arriving at the button (so the motion always
+            // reads as ~1s), then fade it out in place.
+            if (pos.value < 1f) {
+                val remainingMs = ((1f - pos.value) * 1000f).toInt().coerceAtLeast(140)
+                pos.animateTo(1f, animationSpec = tween(remainingMs, easing = FastOutSlowInEasing))
+            }
+            alpha.animateTo(0f, animationSpec = tween(260))
+            running = false
+            pos.snapTo(0f)
+        }
+    }
+    if (!active && !running) return
+
+    val color = MaterialTheme.colorScheme.primary
+    Box(
+        modifier = Modifier
+            .matchParentSize()
+            .drawBehind {
+                val p = pos.value
+                val a = alpha.value
+                if (a <= 0f) return@drawBehind
+                val w = size.width
+                // Fixed (dp-based) sizing so the wave looks the same regardless
+                // of how tall the card is.
+                val band = 96.dp.toPx()
+                val startCenter = 24.dp.toPx()
+                // Stop in line with the button center: the button sits 14.dp from
+                // the card bottom and is 48.dp tall → center is 38.dp up.
+                val endCenter = size.height - 38.dp.toPx()
+                val center = startCenter + (endCenter - startCenter) * p
+                drawRect(
+                    brush = Brush.verticalGradient(
+                        0f to Color.Transparent,
+                        0.3f to color.copy(alpha = 0.28f),
+                        0.7f to color.copy(alpha = 0.28f),
+                        1f to Color.Transparent,
+                        startY = center - band / 2f,
+                        endY = center + band / 2f,
+                    ),
+                    topLeft = Offset(0f, center - band / 2f),
+                    size = Size(w, band),
+                    alpha = a,
+                )
+            },
+    )
 }
 
 private fun preferredEntry(entries: List<DictEntry>): DictEntry =
@@ -1030,22 +1299,62 @@ private fun CommonBadge() {
 }
 
 @Composable
-private fun SenseLine(index: Int, sense: com.tangotori.app.domain.models.Sense) {
+private fun SenseLine(
+    index: Int,
+    sense: com.tangotori.app.domain.models.Sense,
+    highlighted: Boolean = false,
+) {
     // Misc/field/dialect notes have been hoisted out of SenseLine and into
     // [SenseNotes] (rendered ABOVE the gloss per spec). SenseLine itself is
     // now just the numbered gloss text.
     val glossText = sense.glosses.joinToString("; ") { it.text }
+    val numberColor = if (highlighted) LogoRed.copy(alpha = 0.8f)
+                      else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f)
+    val glossColor = if (highlighted) LogoRed else MaterialTheme.colorScheme.onSurface
     Row {
         Text(
             text = "$index. ",
-            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f),
+            color = numberColor,
             fontSize = 14.sp,
+            fontWeight = if (highlighted) FontWeight.SemiBold else FontWeight.Normal,
         )
         Text(
             text = glossText,
             fontSize = 14.sp,
-            color = MaterialTheme.colorScheme.onSurface,
+            color = glossColor,
+            fontWeight = if (highlighted) FontWeight.SemiBold else FontWeight.Normal,
         )
     }
+}
+
+/** Top-of-card "In-context meaning" block: shimmer while the disambiguation
+ *  call is in flight, then the LLM's contextual gloss. Styled like the compound
+ *  "Tango Tori Meaning" section. */
+@Composable
+private fun InContextSection(loading: Boolean, meaning: String?) {
+    if (!loading && meaning == null) return
+    if (meaning != null) {
+        Text(
+            "In-context meaning",
+            fontSize = 11.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = MutedNoteColor,
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(meaning, fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface)
+    } else {
+        BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+            val widthPx = with(LocalDensity.current) { maxWidth.toPx() }
+            val brush = shimmerBrush(widthPx)
+            Column {
+                SkeletonBar(brush, widthFraction = 0.42f, height = 11.dp)
+                Spacer(Modifier.height(6.dp))
+                SkeletonBar(brush, widthFraction = 0.82f, height = 14.dp)
+            }
+        }
+    }
+    Spacer(Modifier.height(12.dp))
+    HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.10f))
+    Spacer(Modifier.height(10.dp))
 }
 

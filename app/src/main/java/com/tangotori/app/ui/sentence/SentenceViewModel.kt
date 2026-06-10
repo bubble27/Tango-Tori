@@ -7,6 +7,10 @@ import com.tangotori.app.data.IncomingSentenceBus
 import com.tangotori.app.data.anki.AnkiCardRepository
 import com.tangotori.app.data.anki.AnkiPreferences
 import com.tangotori.app.data.compound.CompoundMeaningRepository
+import com.tangotori.app.data.context.DisambiguationResult
+import com.tangotori.app.data.context.SenseDisambiguationRepository
+import com.tangotori.app.data.history.SentenceHistoryRepository
+import com.tangotori.app.data.settings.AppPreferences
 import com.tangotori.app.data.compound.MeaningResult
 import com.tangotori.app.data.anki.DefaultDeck
 import com.tangotori.app.data.db.JmdictDao
@@ -31,13 +35,16 @@ import com.tangotori.app.domain.util.SentenceHtmlBuilder
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.mapLatest
 import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
@@ -53,6 +60,19 @@ data class EntryLookup(
     val subUnits: List<LookupResult> = emptyList(),
     /** null = fetch in flight; non-null = result received */
     val compoundMeaningResult: MeaningResult? = null,
+    /** In-context disambiguation is running for this lookup. */
+    val inContextLoading: Boolean = false,
+    /** Resolved most-relevant sense for the sentence (null until/unless found). */
+    val inContext: InContextSense? = null,
+)
+
+/** The dictionary sense the LLM judged most relevant to the current sentence,
+ *  plus a short contextual gloss. [entryIndex]/[senseIndex] index into
+ *  [EntryLookup.entries] and that entry's senses. */
+data class InContextSense(
+    val entryIndex: Int,
+    val senseIndex: Int,
+    val meaning: String,
 )
 
 data class DeckPickerState(
@@ -82,7 +102,12 @@ data class SentenceUiState(
     val entries: Map<Int, EntryLookup> = emptyMap(),
     val defaultDeck: DefaultDeck? = null,
     val deckPicker: DeckPickerState? = null,
-    val isSubmittingCard: Boolean = false,
+    /** Entry id whose card is currently being submitted (drives the per-card
+     *  "creating" ripple animation). null = no submission in flight. */
+    val submittingEntryId: Long? = null,
+    /** entryId -> deck name for cards added (or found duplicate) during this
+     *  sentence view. Drives the disabled "Already added to <deck>" button. */
+    val addedDecks: Map<Long, String> = emptyMap(),
     val cardResult: CardSubmitResult? = null,
     val linkToKanjiStudy: Boolean = false,
     /** Language currently active (auto-detected or manually overridden). */
@@ -104,10 +129,13 @@ class SentenceViewModel @Inject constructor(
     private val anki: AnkiCardRepository,
     private val createCard: CreateCardUseCase,
     private val ankiPrefs: AnkiPreferences,
+    private val historyRepo: SentenceHistoryRepository,
+    private val appPrefs: AppPreferences,
     private val incomingBus: IncomingSentenceBus,
     private val jmdictDao: JmdictDao,
     private val cedictRepo: CedictRepository,
     private val compoundMeaningRepo: CompoundMeaningRepository,
+    private val senseDisambiguation: SenseDisambiguationRepository,
     private val savedState: SavedStateHandle,
 ) : ViewModel() {
 
@@ -168,6 +196,9 @@ class SentenceViewModel @Inject constructor(
         }
     }
 
+    val recentSentences: StateFlow<List<String>> = historyRepo.recentSentences
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
     private val _state = MutableStateFlow(SentenceUiState(
         input = savedState["input"] ?: "",
         linkToKanjiStudy = savedState["linkToKanjiStudy"] ?: false,
@@ -220,6 +251,9 @@ class SentenceViewModel @Inject constructor(
                     tokens = tokens,
                     isTokenizing = false,
                     entries = emptyMap(),
+                    // New sentence → cards from the old one are no longer "added"
+                    // (a different sentence makes a different Anki card).
+                    addedDecks = emptyMap(),
                 )
             }
             .launchIn(viewModelScope)
@@ -231,6 +265,14 @@ class SentenceViewModel @Inject constructor(
         incomingBus.events
             .onEach { acceptSharedSentence(it) }
             .launchIn(viewModelScope)
+
+        // Restore the persisted language override on a fresh launch. A value
+        // already in savedState (process recreated mid-session) takes priority.
+        if (savedState.get<String>("languageOverride") == null) {
+            viewModelScope.launch {
+                appPrefs.languageOverride.first()?.let { setLanguageOverride(it) }
+            }
+        }
     }
 
     fun loadSentence(sentence: String) = acceptSharedSentence(sentence)
@@ -250,6 +292,7 @@ class SentenceViewModel @Inject constructor(
                 error = null,
                 selectedIndex = null,
                 entries = emptyMap(),
+                addedDecks = emptyMap(),
             )
             val tokens = runCatching {
                 when (effective) {
@@ -267,6 +310,7 @@ class SentenceViewModel @Inject constructor(
                 isEditing = tokens.isEmpty(),
             )
             inputFlow.value = text
+            historyRepo.addSentence(text)
         }
     }
 
@@ -314,8 +358,14 @@ class SentenceViewModel @Inject constructor(
                     }
                 }
             }.getOrElse { EntryLookup(loading = false, error = it.message) }
+
+            // In-context disambiguation is worth running only when there are 2+
+            // candidate senses (across homograph entries) to choose between.
+            val ctxEntries = newLookup.entries
+            val ctxEligible = ctxEntries != null && ctxEntries.sumOf { it.senses.size } >= 2
+
             _state.value = _state.value.copy(
-                entries = _state.value.entries + (index to newLookup),
+                entries = _state.value.entries + (index to newLookup.copy(inContextLoading = ctxEligible)),
             )
             // Fetch compound meaning asynchronously after the card is visible.
             if (newLookup.isFallbackSplit) {
@@ -329,6 +379,29 @@ class SentenceViewModel @Inject constructor(
                     )
                 }
             }
+            // Pick the most relevant sense for the sentence (separate Haiku call).
+            if (ctxEligible && ctxEntries != null) {
+                val sentence = _state.value.input
+                val langCode = if (lang == Language.JAPANESE) "ja" else "zh"
+                launch {
+                    val result = senseDisambiguation.disambiguate(
+                        language = langCode,
+                        word = token.surface,
+                        sentence = sentence,
+                        entries = ctxEntries,
+                    )
+                    val current = _state.value.entries[index] ?: return@launch
+                    val inCtx = (result as? DisambiguationResult.Success)?.let {
+                        InContextSense(it.entryIndex, it.senseIndex, it.meaning)
+                    }
+                    _state.value = _state.value.copy(
+                        entries = _state.value.entries + (index to current.copy(
+                            inContextLoading = false,
+                            inContext = inCtx,
+                        )),
+                    )
+                }
+            }
         }
     }
 
@@ -338,7 +411,9 @@ class SentenceViewModel @Inject constructor(
 
     fun finishEditing() {
         if (_state.value.input.isBlank()) return
+        val text = _state.value.input
         _state.value = _state.value.copy(isEditing = false)
+        viewModelScope.launch { historyRepo.addSentence(text) }
     }
 
     /**
@@ -349,6 +424,7 @@ class SentenceViewModel @Inject constructor(
      */
     fun setLanguageOverride(override: Language?) {
         savedState["languageOverride"] = override?.name
+        viewModelScope.launch { appPrefs.setLanguageOverride(override) }
         val detected = LanguageDetector.detect(_state.value.input)
         val effective = override ?: detected
         val text = _state.value.input
@@ -358,6 +434,7 @@ class SentenceViewModel @Inject constructor(
             tokens = emptyList(),
             selectedIndex = null,
             entries = emptyMap(),
+            addedDecks = emptyMap(),
         )
         if (text.isBlank()) return
         viewModelScope.launch {
@@ -429,7 +506,7 @@ class SentenceViewModel @Inject constructor(
             return
         }
         viewModelScope.launch {
-            _state.value = _state.value.copy(isSubmittingCard = true)
+            _state.value = _state.value.copy(submittingEntryId = entry.id)
             val lang = _state.value.language
             val isChinese = lang != Language.JAPANESE
             val sentenceTokens = _state.value.tokens.map { t ->
@@ -456,8 +533,20 @@ class SentenceViewModel @Inject constructor(
                 language = lang,
             )
             val result = anki.addCard(card, deckId)
+            // Both a fresh add and a duplicate mean the card is now in the deck,
+            // so either way mark it added (button → "Already added to <deck>").
+            val addedDeckName = when (result) {
+                is AnkiCardRepository.AddResult.Success -> result.deckName
+                AnkiCardRepository.AddResult.Duplicate -> deckName
+                is AnkiCardRepository.AddResult.Failed -> null
+            }
             _state.value = _state.value.copy(
-                isSubmittingCard = false,
+                submittingEntryId = null,
+                addedDecks = if (addedDeckName != null) {
+                    _state.value.addedDecks + (entry.id to addedDeckName)
+                } else {
+                    _state.value.addedDecks
+                },
                 cardResult = when (result) {
                     is AnkiCardRepository.AddResult.Success ->
                         CardSubmitResult.Success(result.deckName)

@@ -9,6 +9,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.ui.Modifier
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
+import androidx.core.view.WindowCompat
 import com.tangotori.app.data.IncomingSentenceBus
 import com.tangotori.app.ui.sentence.SentenceScreen
 import com.tangotori.app.ui.theme.TangoToriTheme
@@ -26,6 +27,10 @@ class MainActivity : ComponentActivity() {
         // post-splash theme (Theme.TangoTori) for us once content is ready.
         installSplashScreen()
         super.onCreate(savedInstanceState)
+        // Opt into edge-to-edge so Compose receives IME insets and can keep
+        // the edit-screen buttons above the keyboard via the Scaffold's
+        // safeDrawing contentWindowInsets.
+        WindowCompat.setDecorFitsSystemWindows(window, false)
         // Soft hint to the system: prefer 120 Hz for this window. Unlike
         // `preferredDisplayModeId` (which pins the display and caused
         // system-wide jank earlier), this is just a preference — the

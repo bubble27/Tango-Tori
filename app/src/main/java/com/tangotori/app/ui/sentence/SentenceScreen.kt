@@ -39,11 +39,14 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -56,6 +59,12 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ContentPaste
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
@@ -111,6 +120,36 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import com.tangotori.app.ui.theme.BodyTintDark
 import com.tangotori.app.ui.theme.BodyTintLight
 import com.tangotori.app.ui.theme.HeaderTintLight
+import com.tangotori.app.ui.theme.BodyTint
+import com.tangotori.app.ui.theme.PosAdverb
+import com.tangotori.app.ui.theme.PosAuxiliaryVerb
+import com.tangotori.app.ui.theme.PosCompound
+import com.tangotori.app.ui.theme.PosIAdjective
+import com.tangotori.app.ui.theme.PosNaAdjective
+import com.tangotori.app.ui.theme.PosNoun
+import com.tangotori.app.ui.theme.PosVerb
+import androidx.compose.ui.graphics.lerp
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.Image
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.style.TextOverflow
+import com.tangotori.app.R
+import com.tangotori.app.ui.theme.LogoRed
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.text.input.ImeAction
+import kotlinx.coroutines.delay
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.layout.onSizeChanged
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -118,6 +157,7 @@ fun SentenceScreen(
     viewModel: SentenceViewModel = hiltViewModel(),
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+    val recentSentences by viewModel.recentSentences.collectAsStateWithLifecycle()
     val listState = rememberLazyListState()
     val snackbarHost = remember { SnackbarHostState() }
     val context = LocalContext.current
@@ -161,14 +201,14 @@ fun SentenceScreen(
         }
     }
 
-    // Surface card-creation results as snackbars; pop the result once shown.
+    // Success and duplicate are now communicated inline by the add button's
+    // animation ("Successfully added" → "Already added to <deck>"), so only
+    // surface real failures as snackbars.
     LaunchedEffect(state.cardResult) {
         val r = state.cardResult ?: return@LaunchedEffect
         when (r) {
-            is CardSubmitResult.Success -> snackbarHost.showSnackbar("Card added to ${r.deckName} ✓")
-            CardSubmitResult.Duplicate -> snackbarHost.showSnackbar("Already in your deck (duplicate)")
             is CardSubmitResult.Failed -> snackbarHost.showSnackbar("Couldn't add card: ${r.reason}")
-            CardSubmitResult.AnkiMissing -> { /* dialog renders separately */ }
+            else -> { /* Success/Duplicate: inline button; AnkiMissing: dialog */ }
         }
         if (r !is CardSubmitResult.AnkiMissing) viewModel.clearCardResult()
     }
@@ -195,6 +235,10 @@ fun SentenceScreen(
     Scaffold(
         // No top bar — the parchment surface runs edge to edge for a quieter
         // dictionary feel. Status bar is restyled in themes.xml to match.
+        // Only consume systemBars (status + nav) here; the IME inset is left
+        // unconsumed so EditingLayout can apply imePadding() itself and keep
+        // the action buttons above the keyboard.
+        contentWindowInsets = WindowInsets.systemBars,
         snackbarHost = { SnackbarHost(snackbarHost) },
     ) { inner ->
         // Crossfade between the two modes. Edit → view is intentionally
@@ -220,10 +264,12 @@ fun SentenceScreen(
                 EditingLayout(
                     input = state.input,
                     languageOverride = state.languageOverride,
+                    recentSentences = recentSentences,
                     onInputChange = viewModel::onInputChange,
                     onFinishEditing = viewModel::finishEditing,
                     onPasteSentence = viewModel::loadSentence,
                     onSetLanguage = viewModel::setLanguageOverride,
+                    onHistoryTap = viewModel::loadSentence,
                 )
             } else {
                 ViewingLayout(
@@ -282,84 +328,332 @@ private sealed interface PendingCardAction {
 }
 
 /**
- * Edit mode layout: language toggle at top, input field, then action buttons.
+ * Edit mode: inline logo header, plain text field, scrollable colored history
+ * cards (hide when keyboard is up), sliding language tab bar. No buttons —
+ * the keyboard's Send action submits; tapping a history card reloads it.
  */
 @Composable
 private fun EditingLayout(
     input: String,
     languageOverride: Language?,
+    recentSentences: List<String>,
     onInputChange: (String) -> Unit,
     onFinishEditing: () -> Unit,
     onPasteSentence: (String) -> Unit,
     onSetLanguage: (Language?) -> Unit,
+    onHistoryTap: (String) -> Unit,
 ) {
-    val clipboard = LocalClipboardManager.current
-    val placeholder = when (languageOverride) {
-        Language.JAPANESE -> "Paste a Japanese sentence…"
-        Language.CHINESE_SIMPLIFIED,
-        Language.CHINESE_TRADITIONAL -> "Paste a Chinese sentence…"
-        null -> "Paste Japanese or Chinese text…"
+    val focusManager = LocalFocusManager.current
+    val focusRequester = remember { FocusRequester() }
+    var isTyping by remember { mutableStateOf(false) }
+
+    val clipboardText = LocalClipboardManager.current.getText()?.text?.trim().orEmpty()
+    val showPasteHint = isTyping && input.isEmpty() && clipboardText.isNotEmpty()
+
+    // Measured height of the header (logo + type area) so the card stack can be
+    // inset to start just below it — yet still scroll up and tuck cleanly behind
+    // the header's opaque, round-bottomed overlay.
+    val density = LocalDensity.current
+    var headerHeightPx by remember { mutableStateOf(0) }
+    val headerHeightDp = with(density) { headerHeightPx.toDp() }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .imePadding(),
+    ) {
+        // ── BackHandler: back key clears focus (dismisses keyboard + typing mode)
+        BackHandler(enabled = isTyping) {
+            focusManager.clearFocus()
+        }
+
+        // ── History cards: full-height scrollable layer behind the header ────
+        AnimatedContent(
+            targetState = !isTyping && recentSentences.isNotEmpty(),
+            modifier = Modifier.fillMaxSize(),
+            transitionSpec = {
+                fadeIn(tween(220)) togetherWith fadeOut(tween(150))
+            },
+            label = "editMiddle",
+        ) { showHistory ->
+            if (showHistory) {
+                HistoryCardList(
+                    sentences = recentSentences,
+                    topInset = headerHeightDp + 16.dp,
+                    onTap = onHistoryTap,
+                )
+            } else {
+                Box(Modifier.fillMaxSize())
+            }
+        }
+
+        // ── Header overlay: logo + type area. Opaque page-colored background
+        //    with rounded bottom corners so cards slide cleanly behind it. ────
+        Column(
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .fillMaxWidth()
+                .onSizeChanged { headerHeightPx = it.height }
+                .background(
+                    MaterialTheme.colorScheme.surface,
+                    RoundedCornerShape(bottomStart = 28.dp, bottomEnd = 28.dp),
+                ),
+        ) {
+            // ── Logo row: bird on left, title inline ─────────────────────────
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 16.dp, end = 16.dp, top = 18.dp, bottom = 6.dp),
+            ) {
+                // ic_bird_logo has a drawable-night-xxxhdpi variant (inverted
+                // bird) that Android auto-selects in dark mode.
+                Image(
+                    painter = painterResource(R.drawable.ic_bird_logo),
+                    contentDescription = null,
+                    modifier = Modifier.size(88.dp),
+                    contentScale = ContentScale.Fit,
+                )
+                Spacer(Modifier.width(16.dp))
+                Text(
+                    "Tango Tori",
+                    color = LogoRed,
+                    fontSize = 46.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+
+            // ── Plain text input — no box, tapping anywhere focuses ──────────
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 72.dp)
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                    ) { focusRequester.requestFocus() }
+                    .padding(start = 20.dp, end = 20.dp, top = 16.dp, bottom = 24.dp),
+            ) {
+                // Placeholder layers (rendered behind the text field in z-order).
+                // Text/Row don't consume tap events so touches fall through to
+                // BasicTextField, which gains focus and raises the keyboard.
+                if (input.isEmpty()) {
+                    if (showPasteHint) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .clickable(
+                                    interactionSource = remember { MutableInteractionSource() },
+                                    indication = null,
+                                ) {
+                                    focusManager.clearFocus()
+                                    onPasteSentence(clipboardText)
+                                },
+                        ) {
+                            Icon(
+                                Icons.Default.ContentPaste,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp),
+                                tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.65f),
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                "paste from clipboard",
+                                fontSize = 16.sp,
+                                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.65f),
+                            )
+                        }
+                    } else if (!isTyping) {
+                        Text(
+                            "Tap to start typing…",
+                            fontSize = 18.sp,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.28f),
+                        )
+                    }
+                }
+                BasicTextField(
+                    value = input,
+                    onValueChange = onInputChange,
+                    textStyle = LocalTextStyle.current.copy(
+                        fontSize = 18.sp,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    ),
+                    cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                    keyboardActions = KeyboardActions(onSend = {
+                        focusManager.clearFocus()
+                        if (input.isNotBlank()) onFinishEditing()
+                    }),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .focusRequester(focusRequester)
+                        .onFocusChanged { isTyping = it.isFocused },
+                )
+            }
+        }
+
+        // ── Language tab bar — overlaid over the cards, anchored to the bottom.
+        LanguageTabBar(
+            selected = languageOverride,
+            onSelect = onSetLanguage,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .padding(start = 16.dp, end = 16.dp, bottom = 24.dp),
+        )
     }
+}
+
+// Subtle accent tints — each card lerps 10% from the neutral card color toward
+// one of the app's own part-of-speech colors, so the stack has gentle variation
+// without straying from the palette.
+private val historyCardAccents = listOf(
+    PosNaAdjective,
+    PosAdverb,
+    PosCompound,
+    PosNoun,
+    PosIAdjective,
+    PosAuxiliaryVerb,
+    PosVerb,
+)
+
+@Composable
+private fun HistoryCardList(
+    sentences: List<String>,
+    topInset: Dp,
+    onTap: (String) -> Unit,
+) {
+    var exitingIndex by remember { mutableStateOf<Int?>(null) }
+    val scope = rememberCoroutineScope()
+
+    // Scrollable column with negative spacing so each card overlaps the one
+    // above it, creating a "deck of cards" stack effect. Each card is drawn on
+    // top of the previous one (natural declaration order), so each card's title
+    // (top-aligned) stays visible while its lower body is tucked under the next.
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(horizontal = 16.dp),
-        verticalArrangement = Arrangement.Center,
-        horizontalAlignment = Alignment.CenterHorizontally,
+            .verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy((-(CARD_HEIGHT - CARD_PEEK)).dp),
     ) {
-        LanguageToggle(
-            selected = languageOverride,
-            onSelect = onSetLanguage,
-            modifier = Modifier.fillMaxWidth(),
-        )
-        Spacer(Modifier.height(28.dp))
-        BasicTextField(
-            value = input,
-            onValueChange = onInputChange,
-            textStyle = LocalTextStyle.current.copy(
-                fontSize = 20.sp,
-                color = MaterialTheme.colorScheme.onSurface,
+        // Inset so the first card starts just below the header overlay, yet can
+        // still scroll up and tuck behind it. We add one card-overlap of extra
+        // height to cancel the negative arrangement spacing that the Column also
+        // applies between this spacer and the first card (otherwise the first
+        // card gets pulled up behind the header).
+        Spacer(Modifier.height(topInset + (CARD_HEIGHT - CARD_PEEK).dp))
+        sentences.forEachIndexed { index, sentence ->
+            // Deterministic per-card jitter (derived from the text) so each card
+            // keeps a consistent, subtle tilt + scale — like a hand-stacked pile.
+            val seed = sentence.hashCode()
+            val baseRotation = (((seed % 5) + 5) % 5 - 2) * 0.8f      // -1.6°..1.6°
+            val baseScale = 1f - (((seed / 5 % 3) + 3) % 3) * 0.012f  // 1.0 / .988 / .976
+
+            val isTapped = exitingIndex == index
+            val isOther = exitingIndex != null && !isTapped
+
+            // Tapped card straightens to the default (no tilt, full scale); the
+            // others slide down and fade out before we leave the screen.
+            val rotation by animateFloatAsState(
+                targetValue = if (isTapped) 0f else baseRotation,
+                animationSpec = tween(260),
+                label = "cardRotation",
+            )
+            val scale by animateFloatAsState(
+                targetValue = if (isTapped) 1f else baseScale,
+                animationSpec = tween(260),
+                label = "cardScale",
+            )
+            val cardAlpha by animateFloatAsState(
+                targetValue = if (isOther) 0f else 1f,
+                animationSpec = tween(220),
+                label = "cardAlpha",
+            )
+            val translateY by animateFloatAsState(
+                targetValue = if (isOther) 56f else 0f,
+                animationSpec = tween(260),
+                label = "cardTranslateY",
+            )
+            HistoryCard(
+                sentence = sentence,
+                color = lerp(
+                    BodyTint,
+                    historyCardAccents[index % historyCardAccents.size],
+                    0.2f,
+                ),
+                alpha = cardAlpha,
+                rotation = rotation,
+                scale = scale,
+                translateYDp = translateY,
+                modifier = Modifier.padding(horizontal = 16.dp),
+                onClick = {
+                    if (exitingIndex == null) {
+                        exitingIndex = index
+                        scope.launch {
+                            delay(280)
+                            onTap(sentence)
+                        }
+                    }
+                },
+            )
+        }
+        // Tall trailing spacer: clears the floating language bar and guarantees
+        // the stack overflows the viewport so it's always scrollable (with some
+        // blank space below when there are only a few cards).
+        Spacer(Modifier.height(300.dp))
+    }
+}
+
+// How tall each card is, and how much of it "peeks" out above the next card
+// in the stack (i.e. the visible strip that shows the title).
+private const val CARD_HEIGHT = 132
+private const val CARD_PEEK = 62
+
+@Composable
+private fun HistoryCard(
+    sentence: String,
+    color: Color,
+    alpha: Float,
+    rotation: Float,
+    scale: Float,
+    translateYDp: Float,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(CARD_HEIGHT.dp)
+            .graphicsLayer {
+                this.alpha = alpha
+                rotationZ = rotation
+                scaleX = scale
+                scaleY = scale
+                translationY = translateYDp.dp.toPx()
+            }
+            .shadow(
+                elevation = 8.dp,
+                shape = RoundedCornerShape(18.dp),
+                clip = false,
+            )
+            .clip(RoundedCornerShape(18.dp))
+            .background(color)
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onClick,
             ),
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 8.dp, vertical = 12.dp),
-            decorationBox = { inner ->
-                if (input.isEmpty()) {
-                    Text(
-                        placeholder,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
-                        fontSize = 20.sp,
-                    )
-                }
-                inner()
-            },
+        contentAlignment = Alignment.TopStart,
+    ) {
+        Text(
+            text = sentence,
+            modifier = Modifier.padding(horizontal = 20.dp, vertical = 16.dp),
+            fontSize = 17.sp,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.82f),
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            fontWeight = FontWeight.Medium,
         )
-        Spacer(Modifier.height(20.dp))
-        Button(
-            onClick = {
-                val text = clipboard.getText()?.text?.trim().orEmpty()
-                if (text.isNotEmpty()) onPasteSentence(text)
-            },
-        ) {
-            Icon(
-                imageVector = Icons.Default.ContentPaste,
-                contentDescription = null,
-                modifier = Modifier.padding(end = 8.dp),
-            )
-            Text("Paste from clipboard")
-        }
-        Spacer(Modifier.height(10.dp))
-        Button(
-            onClick = onFinishEditing,
-            enabled = input.isNotBlank(),
-        ) {
-            Icon(
-                imageVector = Icons.Default.Check,
-                contentDescription = null,
-                modifier = Modifier.padding(end = 8.dp),
-            )
-            Text("Finish editing")
-        }
     }
 }
 
@@ -419,7 +713,7 @@ private fun ViewingLayout(
                 selectedAbsIndex = state.selectedIndex,
                 entries = state.entries,
                 defaultDeckName = state.defaultDeck?.name,
-                isSubmittingCard = state.isSubmittingCard,
+                cardAddState = CardAddState(state.submittingEntryId, state.addedDecks),
                 linkToKanjiStudy = state.linkToKanjiStudy,
                 onTokenSelected = onTokenSelected,
                 onAddToDefaultDeck = onAddToDefaultDeck,
@@ -445,7 +739,7 @@ private fun WordList(
     selectedAbsIndex: Int?,
     entries: Map<Int, EntryLookup>,
     defaultDeckName: String?,
-    isSubmittingCard: Boolean,
+    cardAddState: CardAddState,
     linkToKanjiStudy: Boolean,
     onTokenSelected: (Int) -> Unit,
     onAddToDefaultDeck: (Token, DictEntry) -> Unit,
@@ -733,7 +1027,7 @@ private fun WordList(
                 // unfocused header (body rendering is still gated by isExpanded).
                 lookup = entries[absIdx],
                 defaultDeckName = defaultDeckName,
-                isSubmittingCard = isSubmittingCard,
+                cardAddState = cardAddState,
                 linkToKanjiStudy = linkToKanjiStudy,
                 onClick = { onTokenSelected(absIdx) },
                 onAddToDefaultDeck = onAddToDefaultDeck,
@@ -774,7 +1068,7 @@ private fun WordListItem(
     expanded: Boolean,
     lookup: EntryLookup?,
     defaultDeckName: String?,
-    isSubmittingCard: Boolean,
+    cardAddState: CardAddState,
     linkToKanjiStudy: Boolean,
     onClick: () -> Unit,
     onAddToDefaultDeck: (Token, DictEntry) -> Unit,
@@ -962,7 +1256,7 @@ private fun WordListItem(
                             token = token,
                             lookup = lookup,
                             defaultDeckName = defaultDeckName,
-                            isSubmitting = isSubmittingCard,
+                            cardAddState = cardAddState,
                             linkToKanjiStudy = linkToKanjiStudy,
                             onAddToDefaultDeck = onAddToDefaultDeck,
                             onChooseDeck = onChooseDeck,
@@ -1153,68 +1447,76 @@ internal fun shimmerBrush(widthPx: Float): Brush {
 }
 
 /**
- * Three-way segmented toggle: Auto | 🇯🇵 Japanese | 🇨🇳 Chinese.
- * [selected] null = auto-detect. Placed in the editing screen above the input
- * field so the user picks the language before or after typing.
+ * Three-option pill tab bar. A sliding LogoRed indicator moves between Auto /
+ * Japanese / Chinese with a spring animation. Each slot shows only an icon —
+ * a refresh icon for auto, kanji characters for the languages.
  */
 @Composable
-private fun LanguageToggle(
+private fun LanguageTabBar(
     selected: Language?,
     onSelect: (Language?) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    data class Segment(val lang: Language?, val emoji: String, val label: String)
-    val segments = listOf(
-        Segment(null, "🌐", "Auto"),
-        Segment(Language.JAPANESE, "🇯🇵", "Japanese"),
-        Segment(Language.CHINESE_SIMPLIFIED, "🇨🇳", "Chinese"),
+    val options = listOf<Language?>(null, Language.JAPANESE, Language.CHINESE_SIMPLIFIED)
+    val selectedIdx = options.indexOfFirst { lang ->
+        lang == selected || (lang == Language.CHINESE_SIMPLIFIED && selected == Language.CHINESE_TRADITIONAL)
+    }.coerceAtLeast(0)
+
+    val indicatorFraction by animateFloatAsState(
+        targetValue = selectedIdx / options.size.toFloat(),
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioNoBouncy,
+            stiffness = Spring.StiffnessMedium,
+        ),
+        label = "langTabPill",
     )
-    Row(
+
+    BoxWithConstraints(
         modifier = modifier
-            .height(80.dp)
-            .clip(RoundedCornerShape(14.dp))
+            .height(64.dp)
+            .clip(RoundedCornerShape(18.dp))
             .background(MaterialTheme.colorScheme.surfaceVariant),
     ) {
-        segments.forEachIndexed { i, seg ->
-            val isSelected = selected == seg.lang ||
-                (seg.lang == Language.CHINESE_SIMPLIFIED && selected == Language.CHINESE_TRADITIONAL)
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxHeight()
-                    .clip(
-                        when (i) {
-                            0 -> RoundedCornerShape(topStart = 14.dp, bottomStart = 14.dp)
-                            segments.lastIndex -> RoundedCornerShape(topEnd = 14.dp, bottomEnd = 14.dp)
-                            else -> RoundedCornerShape(0.dp)
-                        }
-                    )
-                    .background(
-                        if (isSelected) MaterialTheme.colorScheme.primary
-                        else Color.Transparent
-                    )
-                    .clickable { onSelect(seg.lang) },
-                contentAlignment = Alignment.Center,
-            ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(seg.emoji, fontSize = 26.sp)
-                    Spacer(Modifier.height(2.dp))
-                    Text(
-                        text = seg.label,
-                        fontSize = 11.sp,
-                        fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
-                        color = if (isSelected) MaterialTheme.colorScheme.onPrimary
-                                else MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-            if (i < segments.lastIndex) {
-                Box(
-                    Modifier
-                        .width(1.dp)
-                        .fillMaxHeight()
-                        .background(MaterialTheme.colorScheme.outline.copy(alpha = 0.25f))
+        // Sliding pill
+        Box(
+            modifier = Modifier
+                .fillMaxHeight()
+                .width(maxWidth / options.size)
+                .graphicsLayer { translationX = maxWidth.toPx() * indicatorFraction }
+                .padding(6.dp)
+                .clip(RoundedCornerShape(14.dp))
+                .background(LogoRed),
+        )
+        // Hit areas + icons
+        Row(modifier = Modifier.fillMaxSize()) {
+            options.forEachIndexed { i, lang ->
+                val isSelected = i == selectedIdx
+                val tint by animateColorAsState(
+                    targetValue = if (isSelected) Color.White
+                                  else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f),
+                    label = "tabTint",
                 )
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight()
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                        ) { onSelect(lang) },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    when (i) {
+                        0 -> Icon(
+                            Icons.Default.Refresh,
+                            contentDescription = null,
+                            modifier = Modifier.size(26.dp),
+                            tint = tint,
+                        )
+                        1 -> Text("日", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = tint)
+                        else -> Text("中", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = tint)
+                    }
+                }
             }
         }
     }

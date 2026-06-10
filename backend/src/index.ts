@@ -23,6 +23,27 @@ interface CompoundResponse {
   cached: boolean;
 }
 
+interface Candidate {
+  id: number;
+  reading: string;
+  pos: string;
+  gloss: string;
+}
+
+interface DisambiguateRequest {
+  device_id: string;
+  language: string; // "ja" | "zh"
+  word: string;
+  sentence: string;
+  candidates: Candidate[];
+}
+
+interface DisambiguateResponse {
+  id: number;
+  meaning: string;
+  cached: boolean;
+}
+
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
@@ -216,6 +237,44 @@ Parts:
 →
 1. photosynthesis`;
 
+// Kept deliberately separate from SYSTEM_PROMPT (compound glossing) so the two
+// Haiku calls never share context — each gets a clean, single-purpose prompt.
+const DISAMBIGUATE_SYSTEM_PROMPT = `You are a reading assistant for Japanese and Chinese learners. You receive a sentence, a target word that appears in it, and a numbered list of candidate dictionary meanings for that word. The candidates may come from several dictionary entries (homographs with different readings).
+
+Your job:
+1. Pick the ONE candidate number whose meaning best matches how the word is actually used in the given sentence.
+2. Write a concise English meaning of the word AS USED IN THIS SENTENCE — a short gloss of a few words, reflecting the contextual sense (not a full sentence, not an explanation).
+
+## Output rules — strict
+- Reply with ONLY a single JSON object: {"id": <number>, "meaning": "<short English gloss>"}
+- No other text, no markdown, no code fences, no commentary.
+- "id" MUST be one of the candidate numbers shown.
+- "meaning" is one short English phrase, ideally under 8 words, no trailing punctuation.
+- Always choose. Never refuse, never hedge.
+
+## Examples
+
+Language: Japanese
+Sentence: 彼はクラブに入った。
+Word: 入った
+Candidate meanings:
+1. (はいる, v5r) to enter; to go in
+2. (はいる, v5r) to join (a club, company); to enroll
+3. (いる, v1) to get in; to contain
+
+→
+{"id": 2, "meaning": "to join (a club)"}
+
+Language: Chinese
+Sentence: 这件衣服的料子很好。
+Word: 料子
+Candidate meanings:
+1. (liào zi, n) material; fabric
+2. (liào zi, n) the makings of (something)
+
+→
+{"id": 1, "meaning": "fabric; material"}`;
+
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
     status,
@@ -239,6 +298,130 @@ function decodeCached(raw: string): string[] {
   return [raw]; // backward compat: old plain-string cache entries
 }
 
+function parseDisambiguation(
+  text: string,
+  candidates: Candidate[]
+): { id: number; meaning: string } | null {
+  const ids = new Set(candidates.map((c) => c.id));
+  let id: number | null = null;
+  let meaning: string | null = null;
+
+  // Preferred path: a JSON object somewhere in the reply.
+  const objMatch = text.match(/\{[\s\S]*\}/);
+  if (objMatch) {
+    try {
+      const o = JSON.parse(objMatch[0]) as { id?: unknown; meaning?: unknown };
+      if (typeof o.id === "number") id = o.id;
+      if (typeof o.meaning === "string") meaning = o.meaning.trim();
+    } catch {}
+  }
+  // Fallbacks for non-JSON replies.
+  if (id === null) {
+    const im = text.match(/"?id"?\s*[:=]\s*(\d+)/i) ?? text.match(/\b(\d+)\b/);
+    if (im) id = parseInt(im[1], 10);
+  }
+  if (meaning === null) {
+    const mm = text.match(/"?meaning"?\s*[:=]\s*"?([^"\n}]+)"?/i);
+    if (mm) meaning = mm[1].trim().replace(/[",.]+$/, "");
+  }
+
+  if (id === null || !ids.has(id)) id = candidates[0].id;
+  if (!meaning) return null;
+  return { id, meaning };
+}
+
+async function handleDisambiguate(request: Request, env: Env): Promise<Response> {
+  let body: DisambiguateRequest;
+  try {
+    body = (await request.json()) as DisambiguateRequest;
+  } catch {
+    return json({ error: "Invalid JSON" }, 400);
+  }
+
+  const { device_id, language, word, sentence, candidates } = body;
+  if (
+    !device_id ||
+    !word ||
+    !sentence ||
+    !Array.isArray(candidates) ||
+    candidates.length === 0
+  ) {
+    return json(
+      { error: "Missing required fields: device_id, word, sentence, candidates" },
+      400
+    );
+  }
+
+  // ── Rate limiting (shared daily budget with /compound) ─────────────────────
+  const today = new Date().toISOString().split("T")[0];
+  const limit = parseInt(env.RATE_LIMIT_PER_DAY ?? "100", 10);
+  const rl = await env.DB.prepare(
+    `INSERT INTO rate_limits (device_id, date, count) VALUES (?, ?, 1)
+     ON CONFLICT(device_id, date) DO UPDATE SET count = count + 1
+     RETURNING count`
+  )
+    .bind(device_id, today)
+    .first<{ count: number }>();
+  if (rl && rl.count > limit) {
+    return json({ error: "Rate limit exceeded" }, 429);
+  }
+
+  // ── Cache lookup ───────────────────────────────────────────────────────────
+  const cacheKey = `${language ?? ""}${word}${sentence}`;
+  const cached = await env.DB.prepare(
+    "SELECT result FROM disambiguation_cache WHERE cache_key = ?"
+  )
+    .bind(cacheKey)
+    .first<{ result: string }>();
+  if (cached) {
+    try {
+      const r = JSON.parse(cached.result) as { id: number; meaning: string };
+      return json({ ...r, cached: true } satisfies DisambiguateResponse);
+    } catch {}
+  }
+
+  // ── LLM call (separate Haiku call, single-purpose prompt) ──────────────────
+  const candText = candidates
+    .map((c) => `${c.id}. (${c.reading}${c.pos ? `, ${c.pos}` : ""}) ${c.gloss}`)
+    .join("\n");
+  const langName =
+    language === "ja" ? "Japanese" : language === "zh" ? "Chinese" : "the target language";
+  const userMessage = `Language: ${langName}\nSentence: ${sentence}\nWord: ${word}\nCandidate meanings:\n${candText}`;
+
+  const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
+  const message = await client.messages.create({
+    model: "claude-haiku-4-5-20251001",
+    max_tokens: 128,
+    system: [
+      {
+        type: "text",
+        text: DISAMBIGUATE_SYSTEM_PROMPT,
+        cache_control: { type: "ephemeral" },
+      },
+    ],
+    messages: [{ role: "user", content: userMessage }],
+  });
+
+  const block = message.content[0];
+  if (block.type !== "text") {
+    return json({ error: "Unexpected response from AI" }, 502);
+  }
+  const parsed = parseDisambiguation(block.text, candidates);
+  if (!parsed) {
+    return json({ error: "Empty response from AI" }, 502);
+  }
+
+  await env.DB.prepare(
+    `INSERT INTO disambiguation_cache (cache_key, result, created_at)
+     VALUES (?, ?, ?)
+     ON CONFLICT(cache_key) DO NOTHING`
+  )
+    .bind(cacheKey, JSON.stringify(parsed), Date.now())
+    .run();
+
+  return json({ ...parsed, cached: false } satisfies DisambiguateResponse);
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     if (request.method === "OPTIONS") {
@@ -249,6 +432,11 @@ export default {
 
     if (url.pathname === "/health") {
       return json({ ok: true });
+    }
+
+    // ── In-context sense disambiguation ──────────────────────────────────────
+    if (url.pathname === "/disambiguate" && request.method === "POST") {
+      return handleDisambiguate(request, env);
     }
 
     if (url.pathname !== "/compound" || request.method !== "POST") {
