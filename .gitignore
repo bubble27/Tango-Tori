@@ -59,6 +59,7 @@ backend/.wrangler/
 
 # --- Internal docs / design specs (not for open source) ---
 HANDOFF.md
+HANDOFF_*.md
 Specs/
 specs/
 

@@ -27,8 +27,8 @@ android {
         applicationId = "com.tangotori.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "0.2.0"
+        versionCode = 3
+        versionName = "0.2.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }
@@ -74,12 +74,13 @@ android {
             excludes += "/META-INF/DEPENDENCIES"
         }
     }
-    // The bundled SudachiDict file is ~216 MB. Leaving it uncompressed lets us
-    // memory-map it from filesDir later and skips a needless gzip/gunzip pass at
-    // install time and on first launch.
-    androidResources {
-        noCompress += listOf("dic", "db")
-    }
+    // The dictionary assets (.dic / .db, ~290 MB raw) are deliberately LEFT
+    // COMPRESSED in the APK — they deflate to ~38% (296 MB APK → ~120 MB).
+    // All three are copied out of the APK before use anyway (SudachiAssetInstaller
+    // and Room's createFromAsset), so compression only costs a one-time inflate
+    // on first launch. Do NOT re-add "dic"/"db" to noCompress: it triples the
+    // APK for zero runtime benefit. (SudachiAssetInstaller's staleness check is
+    // marker-file based because openFd() doesn't work on compressed assets.)
 }
 
 dependencies {

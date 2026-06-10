@@ -1,5 +1,5 @@
 """
-Match mnemonic image filenames in D:\\@Memes to Heisig keyword spellings,
+Match mnemonic image filenames in a local image folder to Heisig keyword spellings,
 then rename each file so its base name exactly matches the keyword.
 
 Matching priority:
@@ -20,8 +20,9 @@ import re
 import difflib
 from pathlib import Path
 
-MEMES_DIR          = Path(r"D:\@Memes")
-TSV_PATH           = Path(r"c:\Users\cptns\OneDrive - University of Toronto\Documents\Self Projects\Tango Tori\Anki JLPT\Heisig Hanzi\simplified_heisig_waog.tsv")
+# Set these to your own local paths before running.
+MEMES_DIR          = Path(r"./mnemonic_images")
+TSV_PATH           = Path(r"./simplified_heisig_waog.tsv")
 FUZZY_THRESHOLD    = 0.90
 LENGTH_RATIO_MIN   = 0.85
 IMAGE_EXTS         = {".jpg", ".jpeg", ".png", ".gif", ".jfif"}

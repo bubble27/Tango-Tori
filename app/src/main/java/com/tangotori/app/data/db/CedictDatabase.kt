@@ -2,6 +2,7 @@ package com.tangotori.app.data.db
 
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
+import java.io.File
 import java.io.FileOutputStream
 
 /**
@@ -12,24 +13,30 @@ import java.io.FileOutputStream
  * discrepancy between the Kotlin entities and the Python-generated file.
  *
  * On first launch the asset is copied to the app's database directory.
- * Subsequent launches re-use the copy (no re-copy unless the file is missing
- * or empty). Returns null if the asset hasn't been generated yet — callers
- * degrade gracefully.
+ * Staleness is tracked with a sibling marker file holding [CEDICT_VERSION]
+ * (the asset is deflate-compressed in the APK, so openFd()-based length
+ * comparison is no longer possible — see app/build.gradle.kts). Bump
+ * [CEDICT_VERSION] whenever the bundled cedict.db is regenerated. Returns
+ * null if the asset hasn't been generated yet — callers degrade gracefully.
  */
 object CedictAsset {
 
     private const val ASSET_NAME = "cedict.db"
 
+    /** Identity of the bundled CC-CEDICT database. Bump when the asset changes. */
+    private const val CEDICT_VERSION = "cedict-v1"
+
     fun open(context: Context): SQLiteDatabase? = try {
-        // noCompress "db" in build.gradle ensures the asset is uncompressed,
-        // so openFd works and returns the true length for staleness detection.
-        val assetLength = context.assets.openFd(ASSET_NAME).use { it.length }
         val dbFile = context.getDatabasePath(ASSET_NAME)
-        if (!dbFile.exists() || dbFile.length() != assetLength) {
+        val marker = File(dbFile.parentFile, "$ASSET_NAME.version")
+        val upToDate = dbFile.exists() && dbFile.length() > 0 &&
+            runCatching { marker.readText() == CEDICT_VERSION }.getOrDefault(false)
+        if (!upToDate) {
             dbFile.parentFile?.mkdirs()
             context.assets.open(ASSET_NAME).use { src ->
                 FileOutputStream(dbFile).use { dst -> src.copyTo(dst) }
             }
+            marker.writeText(CEDICT_VERSION)
         }
         SQLiteDatabase.openDatabase(
             dbFile.absolutePath, null, SQLiteDatabase.OPEN_READONLY
