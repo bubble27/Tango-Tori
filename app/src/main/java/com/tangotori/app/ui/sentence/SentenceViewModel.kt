@@ -41,6 +41,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.mapLatest
 import kotlinx.coroutines.flow.onEach
@@ -210,6 +211,14 @@ class SentenceViewModel @Inject constructor(
 
     private val inputFlow = MutableStateFlow(_state.value.input)
 
+    /** The (text, language) the current [SentenceUiState.tokens] were built from.
+     *  Lets the debounced pipeline skip a redundant re-tokenize when
+     *  [acceptSharedSentence] has already tokenized the text it pushes into
+     *  [inputFlow] — that re-run flashed the spinner between the sentence and
+     *  the word list ~500ms after opening a sentence from history, a visible
+     *  one-frame resize of the dictionary screen's top area. */
+    private var lastTokenized: Pair<String, Language>? = null
+
     init {
         // Immediate language detection (no debounce) so the pill updates as
         // the user types, before the tokenizer fires.
@@ -225,8 +234,19 @@ class SentenceViewModel @Inject constructor(
         // Debounced tokenization routed by active language.
         inputFlow
             .debounce(500)
+            // Skip text that is already tokenized. acceptSharedSentence tokenizes
+            // before flipping to the viewing screen and then syncs inputFlow;
+            // without this filter the pipeline fired ~500ms after landing and
+            // redundantly re-tokenized the same text (spinner flash + token list
+            // replacement = the "top area resizes for a frame" glitch — which only
+            // happened when the sentence changed, because MutableStateFlow drops
+            // equal values).
+            .filter { text ->
+                text.isBlank() || lastTokenized != (text to _state.value.language)
+            }
             .onEach { text ->
                 if (text.isBlank()) {
+                    lastTokenized = null
                     _state.value = _state.value.copy(tokens = emptyList(), selectedIndex = null, isTokenizing = false)
                     return@onEach
                 }
@@ -241,6 +261,8 @@ class SentenceViewModel @Inject constructor(
                         Language.CHINESE_SIMPLIFIED,
                         Language.CHINESE_TRADITIONAL -> chineseTokenize(text)
                     }
+                }.onSuccess {
+                    lastTokenized = text to lang
                 }.getOrElse {
                     _state.value = _state.value.copy(error = it.message, isTokenizing = false)
                     emptyList()
@@ -284,16 +306,10 @@ class SentenceViewModel @Inject constructor(
         val detected = LanguageDetector.detect(text)
         val effective = _state.value.languageOverride ?: detected
         viewModelScope.launch {
-            _state.value = _state.value.copy(
-                input = text,
-                language = effective,
-                isEditing = false,
-                isTokenizing = true,
-                error = null,
-                selectedIndex = null,
-                entries = emptyMap(),
-                addedDecks = emptyMap(),
-            )
+            // Tokenize BEFORE switching to the viewing screen. If we flipped to
+            // viewing first and tokenized after, the top sentence area would start
+            // empty and visibly resize as the tokens/chips arrived. Staying on the
+            // (frozen) editing screen for the brief tokenize keeps the handoff clean.
             val tokens = runCatching {
                 when (effective) {
                     Language.JAPANESE -> tokenize(text)
@@ -301,13 +317,32 @@ class SentenceViewModel @Inject constructor(
                     Language.CHINESE_TRADITIONAL -> chineseTokenize(text)
                 }
             }.getOrElse {
-                _state.value = _state.value.copy(error = it.message, isTokenizing = false)
+                lastTokenized = null
+                _state.value = _state.value.copy(
+                    input = text,
+                    language = effective,
+                    isEditing = false,
+                    isTokenizing = false,
+                    tokens = emptyList(),
+                    selectedIndex = null,
+                    entries = emptyMap(),
+                    addedDecks = emptyMap(),
+                    error = it.message,
+                )
+                inputFlow.value = text
                 return@launch
             }
+            lastTokenized = text to effective
             _state.value = _state.value.copy(
-                tokens = tokens,
-                isTokenizing = false,
+                input = text,
+                language = effective,
                 isEditing = tokens.isEmpty(),
+                isTokenizing = false,
+                tokens = tokens,
+                selectedIndex = null,
+                entries = emptyMap(),
+                addedDecks = emptyMap(),
+                error = null,
             )
             inputFlow.value = text
             historyRepo.addSentence(text)
@@ -359,10 +394,11 @@ class SentenceViewModel @Inject constructor(
                 }
             }.getOrElse { EntryLookup(loading = false, error = it.message) }
 
-            // In-context disambiguation is worth running only when there are 2+
-            // candidate senses (across homograph entries) to choose between.
+            // Run for any entry with at least one sense: even single-meaning
+            // words get a context-aware gloss (conjugation/grammar matters), the
+            // difference being there's no sense to "select".
             val ctxEntries = newLookup.entries
-            val ctxEligible = ctxEntries != null && ctxEntries.sumOf { it.senses.size } >= 2
+            val ctxEligible = ctxEntries != null && ctxEntries.sumOf { it.senses.size } >= 1
 
             _state.value = _state.value.copy(
                 entries = _state.value.entries + (index to newLookup.copy(inContextLoading = ctxEligible)),
@@ -428,6 +464,7 @@ class SentenceViewModel @Inject constructor(
         val detected = LanguageDetector.detect(_state.value.input)
         val effective = override ?: detected
         val text = _state.value.input
+        lastTokenized = null
         _state.value = _state.value.copy(
             languageOverride = override,
             language = effective,
@@ -449,6 +486,7 @@ class SentenceViewModel @Inject constructor(
                 _state.value = _state.value.copy(error = it.message, isTokenizing = false)
                 return@launch
             }
+            lastTokenized = text to effective
             _state.value = _state.value.copy(tokens = tokens, isTokenizing = false)
         }
     }

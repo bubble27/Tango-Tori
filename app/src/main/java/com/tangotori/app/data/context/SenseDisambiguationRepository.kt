@@ -69,8 +69,9 @@ class SenseDisambiguationRepository @Inject constructor(
                 id++
             }
         }
-        // Nothing to disambiguate with fewer than two candidates.
-        if (map.size < 2) return@withContext DisambiguationResult.Failed
+        // Need at least one glossed candidate. A single candidate still gets a
+        // context-aware gloss (id is trivially that one); 0 means nothing to do.
+        if (map.isEmpty()) return@withContext DisambiguationResult.Failed
 
         val body = JSONObject().apply {
             put("device_id", deviceIdProvider.deviceId)

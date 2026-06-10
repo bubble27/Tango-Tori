@@ -10,3 +10,8 @@ database_id = "1b48c5ed-1dd1-4cc4-a4da-f018cecfcbc3"
 
 [vars]
 RATE_LIMIT_PER_DAY = "100"
+# BYPASS_DEVICE_IDS: comma-separated device_ids exempt from the daily rate
+# limit (e.g. your own dev phone). Do NOT commit real ids — they would let
+# anyone bypass the limit on your deployed worker. Set it as a secret:
+#   wrangler secret put BYPASS_DEVICE_IDS
+# The worker reads it from env; if unset, no device is exempted.

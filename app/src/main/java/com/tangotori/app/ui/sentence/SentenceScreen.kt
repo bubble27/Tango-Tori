@@ -40,6 +40,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -87,6 +88,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -115,6 +117,7 @@ import com.tangotori.app.domain.models.Language
 import com.tangotori.app.domain.models.PartOfSpeech
 import com.tangotori.app.domain.models.Token
 import com.tangotori.app.domain.util.KanjiTile
+import com.tangotori.app.ui.components.FuriganaBandHeight
 import com.tangotori.app.ui.components.TokenizedSentenceView
 import androidx.compose.foundation.isSystemInDarkTheme
 import com.tangotori.app.ui.theme.BodyTintDark
@@ -149,6 +152,9 @@ import kotlinx.coroutines.delay
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInWindow
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.layout.onSizeChanged
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -249,13 +255,21 @@ fun SentenceScreen(
             modifier = Modifier
                 .padding(inner)
                 .fillMaxSize(),
+            // Key viewing content by the sentence so a new sentence composes
+            // fresh instead of reusing the prior view's slot — that reuse made
+            // the top sentence area briefly measure at the previous sentence's
+            // size before settling.
+            contentKey = { editing -> if (editing) "edit" else "view:${state.input}" },
             transitionSpec = {
                 if (targetState) {
                     (fadeIn(animationSpec = tween(180, delayMillis = 60)) togetherWith
                         fadeOut(animationSpec = tween(140)))
                 } else {
-                    (fadeIn(animationSpec = tween(40)) togetherWith
-                        fadeOut(animationSpec = tween(110)))
+                    // Edit → view: a gentle cross-dissolve so a tapped history
+                    // card (which has glided to the top) hands off smoothly to
+                    // the sentence rather than snapping.
+                    (fadeIn(animationSpec = tween(240, delayMillis = 80)) togetherWith
+                        fadeOut(animationSpec = tween(260)))
                 }
             },
             label = "sentenceMode",
@@ -272,6 +286,9 @@ fun SentenceScreen(
                     onHistoryTap = viewModel::loadSentence,
                 )
             } else {
+                // Fresh subtree per sentence so no part of the previous view's
+                // layout (e.g. the top sentence area's size) can linger for a frame.
+                key(state.input) {
                 ViewingLayout(
                     state = state,
                     listItems = listItems,
@@ -288,6 +305,7 @@ fun SentenceScreen(
                     loadKanjiTiles = viewModel::loadKanjiBreakdown,
                     onToggleLinkStyle = viewModel::toggleLinkStyle,
                 )
+                }
             }
         }
     }
@@ -347,8 +365,23 @@ private fun EditingLayout(
     val focusRequester = remember { FocusRequester() }
     var isTyping by remember { mutableStateOf(false) }
 
+    // While a tapped history card animates out, blank the field. In edit mode
+    // `input` is still the PREVIOUS sentence, so left as-is the field would show
+    // that sentence (at its full, possibly tall height) during the transition —
+    // which read as the top area "reverting to the previous sentence's size"
+    // before the new dictionary screen settled.
+    var exiting by remember { mutableStateOf(false) }
+    val shownInput = if (exiting) "" else input
+    // Fade the header (logo + type field) out as a tapped card rises past it to
+    // the top of the screen, so the card isn't hidden behind the opaque header.
+    val headerAlpha by animateFloatAsState(
+        targetValue = if (exiting) 0f else 1f,
+        animationSpec = tween(280),
+        label = "headerFade",
+    )
+
     val clipboardText = LocalClipboardManager.current.getText()?.text?.trim().orEmpty()
-    val showPasteHint = isTyping && input.isEmpty() && clipboardText.isNotEmpty()
+    val showPasteHint = isTyping && shownInput.isEmpty() && clipboardText.isNotEmpty()
 
     // Measured height of the header (logo + type area) so the card stack can be
     // inset to start just below it — yet still scroll up and tuck cleanly behind
@@ -381,6 +414,7 @@ private fun EditingLayout(
                     sentences = recentSentences,
                     topInset = headerHeightDp + 16.dp,
                     onTap = onHistoryTap,
+                    onExitStart = { exiting = true },
                 )
             } else {
                 Box(Modifier.fillMaxSize())
@@ -393,7 +427,14 @@ private fun EditingLayout(
             modifier = Modifier
                 .align(Alignment.TopCenter)
                 .fillMaxWidth()
-                .onSizeChanged { headerHeightPx = it.height }
+                // Freeze the measured height during the exit animation. Blanking
+                // the field (shownInput = "") collapses a tall multi-line input,
+                // which would shrink topInset → the stack's spacer → shift every
+                // card's layout UP mid-flight. The tapped card's rise translation
+                // was computed against its pre-shift position, so that shift made
+                // it overshoot past the status bar by the collapsed text height.
+                .onSizeChanged { if (!exiting) headerHeightPx = it.height }
+                .graphicsLayer { alpha = headerAlpha }
                 .background(
                     MaterialTheme.colorScheme.surface,
                     RoundedCornerShape(bottomStart = 28.dp, bottomEnd = 28.dp),
@@ -437,7 +478,7 @@ private fun EditingLayout(
                 // Placeholder layers (rendered behind the text field in z-order).
                 // Text/Row don't consume tap events so touches fall through to
                 // BasicTextField, which gains focus and raises the keyboard.
-                if (input.isEmpty()) {
+                if (shownInput.isEmpty()) {
                     if (showPasteHint) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
@@ -463,7 +504,7 @@ private fun EditingLayout(
                                 color = MaterialTheme.colorScheme.primary.copy(alpha = 0.65f),
                             )
                         }
-                    } else if (!isTyping) {
+                    } else if (!isTyping && !exiting) {
                         Text(
                             "Tap to start typing…",
                             fontSize = 18.sp,
@@ -472,7 +513,7 @@ private fun EditingLayout(
                     }
                 }
                 BasicTextField(
-                    value = input,
+                    value = shownInput,
                     onValueChange = onInputChange,
                     textStyle = LocalTextStyle.current.copy(
                         fontSize = 18.sp,
@@ -522,9 +563,29 @@ private fun HistoryCardList(
     sentences: List<String>,
     topInset: Dp,
     onTap: (String) -> Unit,
+    onExitStart: () -> Unit = {},
 ) {
     var exitingIndex by remember { mutableStateOf<Int?>(null) }
     val scope = rememberCoroutineScope()
+
+    // Once a card is tapped we freeze the list to a snapshot. Tapping triggers
+    // addSentence(), which moves that sentence to the FRONT of recentSentences;
+    // because the cards are positional, that reorder would otherwise reassign
+    // sentences to positions mid-animation and flicker the tapped card to a
+    // different one (and bleed through the crossfade onto the next screen).
+    var frozen by remember { mutableStateOf<List<String>?>(null) }
+    val display = frozen ?: sentences
+
+    // Measured positions (root coords) so a tapped card can rise to the REAL top
+    // of the screen — robust to variable card heights and scroll offset. Held in
+    // plain (non-snapshot) holders since they're only read in the tap handler.
+    val density = LocalDensity.current
+    // The tapped card should rise to just below the status bar (where the
+    // sentence sits on the next screen), NOT to the very top of the window.
+    val statusBarTopPx = WindowInsets.statusBars.getTop(density).toFloat()
+    val viewportTop = remember { floatArrayOf(0f) }
+    val cardTops = remember { mutableMapOf<Int, Float>() }
+    var riseTargetPx by remember { mutableStateOf(0f) }
 
     // Scrollable column with negative spacing so each card overlaps the one
     // above it, creating a "deck of cards" stack effect. Each card is drawn on
@@ -533,6 +594,7 @@ private fun HistoryCardList(
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .onGloballyPositioned { viewportTop[0] = it.positionInWindow().y }
             .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy((-(CARD_HEIGHT - CARD_PEEK)).dp),
     ) {
@@ -542,7 +604,7 @@ private fun HistoryCardList(
         // applies between this spacer and the first card (otherwise the first
         // card gets pulled up behind the header).
         Spacer(Modifier.height(topInset + (CARD_HEIGHT - CARD_PEEK).dp))
-        sentences.forEachIndexed { index, sentence ->
+        display.forEachIndexed { index, sentence ->
             // Deterministic per-card jitter (derived from the text) so each card
             // keeps a consistent, subtle tilt + scale — like a hand-stacked pile.
             val seed = sentence.hashCode()
@@ -552,26 +614,36 @@ private fun HistoryCardList(
             val isTapped = exitingIndex == index
             val isOther = exitingIndex != null && !isTapped
 
-            // Tapped card straightens to the default (no tilt, full scale); the
-            // others slide down and fade out before we leave the screen.
+            // Tapped card straightens (no tilt, full scale) and glides slowly up
+            // to the top of the stack; the others drop down first, then fade.
             val rotation by animateFloatAsState(
                 targetValue = if (isTapped) 0f else baseRotation,
-                animationSpec = tween(260),
+                animationSpec = tween(300),
                 label = "cardRotation",
             )
             val scale by animateFloatAsState(
                 targetValue = if (isTapped) 1f else baseScale,
-                animationSpec = tween(260),
+                animationSpec = tween(300),
                 label = "cardScale",
             )
+            // Others fade only AFTER they've started dropping (~0.3s delay); the
+            // tapped card stays fully opaque as it travels.
             val cardAlpha by animateFloatAsState(
                 targetValue = if (isOther) 0f else 1f,
-                animationSpec = tween(220),
+                animationSpec = tween(durationMillis = 240, delayMillis = if (isOther) 300 else 0),
                 label = "cardAlpha",
             )
+            // Tapped card rises (measured) to ~8dp from the screen's content top,
+            // staying opaque; others drop down then fade. Tapped travels slowly.
+            val dropPx = with(density) { 52.dp.toPx() }
+            val targetPx = when {
+                isTapped -> riseTargetPx
+                isOther -> dropPx
+                else -> 0f
+            }
             val translateY by animateFloatAsState(
-                targetValue = if (isOther) 56f else 0f,
-                animationSpec = tween(260),
+                targetValue = targetPx,
+                animationSpec = tween(durationMillis = if (isTapped) 550 else 300),
                 label = "cardTranslateY",
             )
             HistoryCard(
@@ -584,13 +656,36 @@ private fun HistoryCardList(
                 alpha = cardAlpha,
                 rotation = rotation,
                 scale = scale,
-                translateYDp = translateY,
-                modifier = Modifier.padding(horizontal = 16.dp),
+                translateYPx = translateY,
+                // Tapped card rides above its neighbours as it glides up.
+                modifier = Modifier
+                    .onGloballyPositioned { cardTops[index] = it.positionInWindow().y }
+                    .zIndex(if (isTapped) 10f else 0f)
+                    .padding(horizontal = 16.dp),
                 onClick = {
                     if (exitingIndex == null) {
+                        frozen = display
+                        // Glide so this card's TEXT lands exactly where the
+                        // sentence's word text appears on the viewing screen
+                        // (window coords; content starts below the status bar):
+                        //   + 6dp  sentence Box vertical padding (ViewingLayout)
+                        //   + 6dp  FlowRow vertical padding (TokenizedSentenceView)
+                        //   + furigana band — word glyphs sit below it
+                        //   − 16dp the card's own text vertical padding (HistoryCard)
+                        val cardTop = cardTops[index] ?: viewportTop[0]
+                        val targetTop = statusBarTopPx + with(density) {
+                            (6.dp + 6.dp + FuriganaBandHeight - 16.dp).toPx()
+                        }
+                        riseTargetPx = targetTop - cardTop
+                        android.util.Log.d(
+                            "CardRise",
+                            "cardTop=$cardTop statusBar=$statusBarTopPx " +
+                                "targetTop=$targetTop riseY=$riseTargetPx",
+                        )
                         exitingIndex = index
+                        onExitStart()
                         scope.launch {
-                            delay(280)
+                            delay(500)
                             onTap(sentence)
                         }
                     }
@@ -604,8 +699,10 @@ private fun HistoryCardList(
     }
 }
 
-// How tall each card is, and how much of it "peeks" out above the next card
-// in the stack (i.e. the visible strip that shows the title).
+// CARD_HEIGHT is the MINIMUM card height (and the baseline that, minus the
+// peek, sets the stack overlap). Cards grow taller than this to fit their text;
+// the extra height is hidden under the next card in the stack and only fully
+// revealed when a card rises to the top of the screen.
 private const val CARD_HEIGHT = 132
 private const val CARD_PEEK = 62
 
@@ -616,20 +713,20 @@ private fun HistoryCard(
     alpha: Float,
     rotation: Float,
     scale: Float,
-    translateYDp: Float,
+    translateYPx: Float,
     modifier: Modifier = Modifier,
     onClick: () -> Unit,
 ) {
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .height(CARD_HEIGHT.dp)
+            .heightIn(min = CARD_HEIGHT.dp)
             .graphicsLayer {
                 this.alpha = alpha
                 rotationZ = rotation
                 scaleX = scale
                 scaleY = scale
-                translationY = translateYDp.dp.toPx()
+                translationY = translateYPx
             }
             .shadow(
                 elevation = 8.dp,
@@ -645,13 +742,15 @@ private fun HistoryCard(
             ),
         contentAlignment = Alignment.TopStart,
     ) {
+        // No maxLines/ellipsis: let the text fill the card and get cleanly
+        // clipped by the card's bounds (and covered by the next card in the
+        // stack). Avoids an ellipsis, which looks unnatural when a card rises
+        // to the top of the screen.
         Text(
             text = sentence,
             modifier = Modifier.padding(horizontal = 20.dp, vertical = 16.dp),
             fontSize = 17.sp,
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.82f),
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
             fontWeight = FontWeight.Medium,
         )
     }
@@ -685,13 +784,24 @@ private fun ViewingLayout(
         val compoundIndices = remember(state.entries) {
             state.entries.entries.filter { it.value.isFallbackSplit }.map { it.key }.toSet()
         }
+        // One-shot ground-truth log of where the sentence content actually
+        // starts (window coords) — compare against CardRise's targetTop to
+        // verify the history-card landing math.
+        val loggedTop = remember { floatArrayOf(Float.NaN) }
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .pointerInput(Unit) {
                     detectTapGestures(onDoubleTap = { onStartEditing() })
                 }
-                .padding(horizontal = 8.dp, vertical = 6.dp),
+                .padding(horizontal = 8.dp, vertical = 6.dp)
+                .onGloballyPositioned {
+                    val y = it.positionInWindow().y
+                    if (loggedTop[0] != y) {
+                        loggedTop[0] = y
+                        android.util.Log.d("CardRise", "sentence content top=$y")
+                    }
+                },
         ) {
             TokenizedSentenceView(
                 tokens = state.tokens,

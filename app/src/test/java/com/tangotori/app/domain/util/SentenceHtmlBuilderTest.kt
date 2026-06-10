@@ -18,11 +18,21 @@ class SentenceHtmlBuilderTest {
         if (pos == PartOfSpeech.PARTICLE || pos == PartOfSpeech.PUNCTUATION) null else 1L,
     )
 
-    @Test fun `noun with kanji gets ruby and link`() {
+    @Test fun `noun with kanji gets ruby and jisho link by default`() {
         val html = SentenceHtmlBuilder.build(
             listOf(SentenceHtmlBuilder.TokenWithEntry(
                 Token("学校", "学校", "がっこう", "がっこう", PartOfSpeech.NOUN, ""), 100L)),
             targetEntryId = null,
+        )
+        assertEquals("<a href=\"https://jisho.org/search/%E5%AD%A6%E6%A0%A1\"><ruby>学校<rt>がっこう</rt></ruby></a>", html)
+    }
+
+    @Test fun `noun with kanji gets kanjistudy link in KS mode`() {
+        val html = SentenceHtmlBuilder.build(
+            listOf(SentenceHtmlBuilder.TokenWithEntry(
+                Token("学校", "学校", "がっこう", "がっこう", PartOfSpeech.NOUN, ""), 100L)),
+            targetEntryId = null,
+            useKanjiStudyLinks = true,
         )
         assertEquals("<a href=\"kanjistudy://word?id=100\"><ruby>学校<rt>がっこう</rt></ruby></a>", html)
     }
@@ -42,7 +52,7 @@ class SentenceHtmlBuilderTest {
             SentenceHtmlBuilder.TokenWithEntry(
                 Token("食べる", "食べる", "たべる", "たべる", PartOfSpeech.VERB, ""), 42L),
         )
-        val html = SentenceHtmlBuilder.build(tokens, targetEntryId = 42L)
+        val html = SentenceHtmlBuilder.build(tokens, targetEntryId = 42L, useKanjiStudyLinks = true)
         assertTrue(html.startsWith("<span class=\"target-word\">"))
         assertTrue(html.endsWith("</span>"))
         assertTrue(html.contains("kanjistudy://word?id=42"))

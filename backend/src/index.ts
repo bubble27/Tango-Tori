@@ -4,6 +4,8 @@ export interface Env {
   DB: D1Database;
   ANTHROPIC_API_KEY: string;
   RATE_LIMIT_PER_DAY: string;
+  /** Comma-separated device_ids exempt from the daily rate limit (e.g. dev phone). */
+  BYPASS_DEVICE_IDS?: string;
 }
 
 interface Part {
@@ -237,49 +239,104 @@ Parts:
 →
 1. photosynthesis`;
 
+// Bump when the disambiguation prompt changes so cached results regenerate.
+const DISAMBIGUATE_PROMPT_VERSION = "2";
+
 // Kept deliberately separate from SYSTEM_PROMPT (compound glossing) so the two
 // Haiku calls never share context — each gets a clean, single-purpose prompt.
-const DISAMBIGUATE_SYSTEM_PROMPT = `You are a reading assistant for Japanese and Chinese learners. You receive a sentence, a target word that appears in it, and a numbered list of candidate dictionary meanings for that word. The candidates may come from several dictionary entries (homographs with different readings).
+const DISAMBIGUATE_SYSTEM_PROMPT = `You are a reading assistant for Japanese and Chinese learners. You receive a sentence, a target word AS IT APPEARS in that sentence (it may be conjugated or inflected), and a numbered list of candidate dictionary meanings for the word's BASE form. The candidates may come from several dictionary entries (homographs with different readings).
 
-Your job:
-1. Pick the ONE candidate number whose meaning best matches how the word is actually used in the given sentence.
-2. Write a concise English meaning of the word AS USED IN THIS SENTENCE — a short gloss of a few words, reflecting the contextual sense (not a full sentence, not an explanation).
+Your job has two parts:
+1. Pick the ONE candidate number whose BASE meaning best matches how the word is used in the sentence.
+2. Write a concise English meaning of the word AS IT IS ACTUALLY USED in this sentence — reflecting its conjugation and the surrounding grammar: tense (past/present), polarity (negative), politeness, and especially mood/modality: questions, invitations/suggestions, volitional ("let's"), potential ("can/be able to"), passive, causative, imperative, requests ("please…", "may I…"), progressive/continuous, and aspect (completed, experiential, ongoing).
+
+The "id" is about the base dictionary sense; the "meaning" is about the live, conjugated usage, so they often differ. Example: base sense is "to go", but the sentence uses a negative-question invitation (行かない？), so the meaning is "shall we go?; do you want to go?".
 
 ## Output rules — strict
-- Reply with ONLY a single JSON object: {"id": <number>, "meaning": "<short English gloss>"}
+- Reply with ONLY a single JSON object: {"id": <number>, "meaning": "<contextual gloss>"}
 - No other text, no markdown, no code fences, no commentary.
 - "id" MUST be one of the candidate numbers shown.
-- "meaning" is one short English phrase, ideally under 8 words, no trailing punctuation.
+- "meaning" is short — one or two phrasings separated by "; ". It must reflect the conjugation/grammar, not the bare dictionary form. Use a trailing "?" when it's a question or invitation; otherwise no trailing punctuation.
 - Always choose. Never refuse, never hedge.
 
 ## Examples
 
 Language: Japanese
-Sentence: 彼はクラブに入った。
-Word: 入った
+Sentence: 一緒に行かない？
+Word: 行かない
 Candidate meanings:
-1. (はいる, v5r) to enter; to go in
-2. (はいる, v5r) to join (a club, company); to enroll
-3. (いる, v1) to get in; to contain
-
+1. (いく, v5k-s) to go; to move (towards); to head (towards)
+2. (いく, v5k-s) to proceed; to turn out
+3. (ゆく, v5k-s) to die; to pass away
 →
-{"id": 2, "meaning": "to join (a club)"}
+{"id": 1, "meaning": "shall we go?; do you want to go?"}
+
+Language: Japanese
+Sentence: 昨日寿司を食べた。
+Word: 食べた
+Candidate meanings:
+1. (たべる, v1) to eat
+2. (たべる, v1) to live on; to make a living
+→
+{"id": 1, "meaning": "ate"}
+
+Language: Japanese
+Sentence: ここで写真を撮ってもいいですか。
+Word: 撮って
+Candidate meanings:
+1. (とる, v5r) to take (a photo); to record
+→
+{"id": 1, "meaning": "may I take (a photo)?"}
 
 Language: Chinese
-Sentence: 这件衣服的料子很好。
-Word: 料子
+Sentence: 我已经吃过饭了。
+Word: 吃过
 Candidate meanings:
-1. (liào zi, n) material; fabric
-2. (liào zi, n) the makings of (something)
-
+1. (chī, v) to eat
+2. (chī, v) to suffer; to incur a loss
 →
-{"id": 1, "meaning": "fabric; material"}`;
+{"id": 1, "meaning": "have eaten (already)"}
+
+Language: Chinese
+Sentence: 我们走吧。
+Word: 走
+Candidate meanings:
+1. (zǒu, v) to walk; to go
+2. (zǒu, v) to leave; to depart
+→
+{"id": 1, "meaning": "let's go; let's get going"}`;
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
     status,
     headers: { "Content-Type": "application/json", ...CORS_HEADERS },
   });
+}
+
+/**
+ * Increments and checks the per-device daily counter. Returns true if the device
+ * is over the limit. Device ids listed in BYPASS_DEVICE_IDS are never limited
+ * (and don't even touch the counter).
+ */
+async function isRateLimited(env: Env, deviceId: string): Promise<boolean> {
+  const bypass = new Set(
+    (env.BYPASS_DEVICE_IDS ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean)
+  );
+  if (bypass.has(deviceId)) return false;
+
+  const today = new Date().toISOString().split("T")[0];
+  const limit = parseInt(env.RATE_LIMIT_PER_DAY ?? "100", 10);
+  const rl = await env.DB.prepare(
+    `INSERT INTO rate_limits (device_id, date, count) VALUES (?, ?, 1)
+     ON CONFLICT(device_id, date) DO UPDATE SET count = count + 1
+     RETURNING count`
+  )
+    .bind(deviceId, today)
+    .first<{ count: number }>();
+  return !!(rl && rl.count > limit);
 }
 
 function parseMeanings(text: string): string[] {
@@ -353,21 +410,12 @@ async function handleDisambiguate(request: Request, env: Env): Promise<Response>
   }
 
   // ── Rate limiting (shared daily budget with /compound) ─────────────────────
-  const today = new Date().toISOString().split("T")[0];
-  const limit = parseInt(env.RATE_LIMIT_PER_DAY ?? "100", 10);
-  const rl = await env.DB.prepare(
-    `INSERT INTO rate_limits (device_id, date, count) VALUES (?, ?, 1)
-     ON CONFLICT(device_id, date) DO UPDATE SET count = count + 1
-     RETURNING count`
-  )
-    .bind(device_id, today)
-    .first<{ count: number }>();
-  if (rl && rl.count > limit) {
+  if (await isRateLimited(env, device_id)) {
     return json({ error: "Rate limit exceeded" }, 429);
   }
 
   // ── Cache lookup ───────────────────────────────────────────────────────────
-  const cacheKey = `${language ?? ""}${word}${sentence}`;
+  const cacheKey = [DISAMBIGUATE_PROMPT_VERSION, language ?? "", word, sentence].join("");
   const cached = await env.DB.prepare(
     "SELECT result FROM disambiguation_cache WHERE cache_key = ?"
   )
@@ -456,18 +504,7 @@ export default {
     }
 
     // ── Rate limiting ────────────────────────────────────────────────────────
-    const today = new Date().toISOString().split("T")[0];
-    const limit = parseInt(env.RATE_LIMIT_PER_DAY ?? "100", 10);
-
-    const rl = await env.DB.prepare(
-      `INSERT INTO rate_limits (device_id, date, count) VALUES (?, ?, 1)
-       ON CONFLICT(device_id, date) DO UPDATE SET count = count + 1
-       RETURNING count`
-    )
-      .bind(device_id, today)
-      .first<{ count: number }>();
-
-    if (rl && rl.count > limit) {
+    if (await isRateLimited(env, device_id)) {
       return json({ error: "Rate limit exceeded" }, 429);
     }
 
