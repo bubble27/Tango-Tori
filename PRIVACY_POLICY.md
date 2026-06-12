@@ -7,6 +7,16 @@ study tool developed by Alexander Davydenko ("I", "me"). This policy explains
 what data the app handles, why, and for how long. The app has **no accounts,
 no sign-in, no ads, and no analytics or tracking SDKs**.
 
+## Opting out entirely
+
+You can turn off the AI features at any time with the **"AI features"
+switch** — found in the app's info dialog (ⓘ) and on the "AI usage & limits"
+screen. With the switch off, **the app makes no network requests of its own
+and nothing you type ever leaves your device**: no lookup content, no device
+identifier, no purchase tokens. The full offline dictionary, flashcard
+creation, and every non-AI feature keep working normally. (In-app purchases,
+if you make them, are always handled by Google Play itself.)
+
 ## Data the app collects
 
 ### 1. Sentences and words you look up
@@ -25,9 +35,10 @@ which forwards it to **Anthropic** (the AI provider) to generate the result.
 - Anthropic processes this text as a service provider on my behalf and,
   per its API terms, does not use it to train its models.
 
-If you never use the AI features (e.g., no internet connection), no lookup
-content leaves your device. Regular dictionary lookups are performed entirely
-offline against the bundled dictionaries.
+If you never use the AI features — or you turn them off with the "AI
+features" switch (see *Opting out entirely* above) — no lookup content leaves
+your device. Regular dictionary lookups are performed entirely offline against
+the bundled dictionaries.
 
 ### 2. A random device identifier
 
