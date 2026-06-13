@@ -1518,6 +1518,110 @@ def _get_cn_tokenizer() -> ChineseTokenizer:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# Meaning-based entry disambiguation
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# A single surface/reading often maps to several dictionary entries
+# (e.g. くらい → 暗い "dark" vs the suffix "about/around"; 側 → そば "near by"
+# vs がわ "side"). Ranking purely by commonness/JLPT picks the wrong entry for
+# these. When the caller supplies the intended English meaning, we score each
+# candidate entry by how well its glosses overlap that meaning and pick the
+# best match instead.
+
+# Generic function words carry no disambiguating signal. Note that content
+# words that *do* disambiguate (about, around, side, month, …) are deliberately
+# NOT in this set.
+_MEANING_STOPWORDS: frozenset[str] = frozenset(
+    "a an the to of for or and in on at as by with etc something someone "
+    "that this be is it from into onto over under than then so such".split()
+)
+_MEANING_WORD_RE = re.compile(r"[a-z]+")
+
+
+def _meaning_tokens(text: str) -> set[str]:
+    """Lowercase content words from a meaning/gloss string (markers stripped)."""
+    return {
+        w for w in _MEANING_WORD_RE.findall(text.lower())
+        if len(w) > 1 and w not in _MEANING_STOPWORDS
+    }
+
+
+def _strip_affix_markers(word: str) -> str:
+    """
+    Drop the leading/trailing placeholder markers used in study lists so the
+    bare form can be matched against tokens, e.g. "〜側" → "側", "…month" → "month".
+    """
+    return word.strip().strip("〜～…").strip(".").strip()
+
+
+def _score_entry_against_meaning(entry: "DictEntry", query: set[str]) -> Optional[tuple[int, int]]:
+    """
+    Best (overlap, -position) over the entry's glosses, or None if nothing
+    overlaps. Earlier senses/glosses win ties — they are the primary meanings.
+    """
+    best: Optional[tuple[int, int]] = None
+    for sense_idx, sense in enumerate(entry.senses):
+        for gloss_idx, gloss in enumerate(sense.glosses):
+            overlap = len(query & _meaning_tokens(gloss.text))
+            if overlap == 0:
+                continue
+            candidate = (overlap, -(sense_idx * 100 + gloss_idx))
+            if best is None or candidate > best:
+                best = candidate
+    return best
+
+
+def _select_entry_index(
+    entries: list["DictEntry"],
+    meaning: Optional[str],
+    default_index: int,
+) -> int:
+    """
+    Index of the entry whose glosses best match `meaning`. Falls back to
+    `default_index` when no meaning is given or nothing overlaps, preserving
+    the original commonness/JLPT ordering.
+    """
+    fallback = min(default_index, len(entries) - 1)
+    if not meaning:
+        return fallback
+    query = _meaning_tokens(meaning)
+    if not query:
+        return fallback
+    best_index: Optional[int] = None
+    best_score: Optional[tuple[int, int, int]] = None
+    for i, entry in enumerate(entries):
+        score = _score_entry_against_meaning(entry, query)
+        if score is None:
+            continue
+        full = (score[0], score[1], -i)   # -i keeps original order as last tiebreak
+        if best_score is None or full > best_score:
+            best_score, best_index = full, i
+    return best_index if best_index is not None else fallback
+
+
+def _contextual_reading(
+    target_token: Optional["Token"],
+    entry: "DictEntry",
+) -> str:
+    """
+    Reading for the card's Reading/Furigana fields. Prefers the token's
+    context-derived reading when the selected entry lacks it but describes the
+    same written form — JMdict has no entry for some contextual readings
+    (e.g. 月 read がつ "month" lives only as a reading of the つき entry).
+    """
+    entry_reading = entry.primary_reading
+    if target_token is None:
+        return entry_reading
+    tok_reading = target_token.dictionary_reading or target_token.reading
+    if not tok_reading or any(_is_kanji(c) for c in tok_reading):
+        return entry_reading
+    if tok_reading in {r.text for r in entry.readings}:
+        return entry_reading
+    same_form = entry.headword in (target_token.surface, target_token.dictionary_form)
+    return tok_reading if same_form else entry_reading
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # Main public API
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -1530,6 +1634,7 @@ def create_card(
     cedict_path: Optional[str | Path] = None,
     entry_index: int = 0,
     include_breakdown: bool = True,
+    meaning: Optional[str] = None,
 ) -> Optional[CardData]:
     """
     Build a Tango Tori Anki card identical to what the Android app would produce.
@@ -1545,6 +1650,11 @@ def create_card(
     cedict_path       : Path to cedict.db (Chinese). Defaults to the app's bundled asset.
     entry_index       : Which result to use when multiple entries match (0 = best).
     include_breakdown : Set False to omit the kanji/hanzi breakdown section.
+    meaning           : Intended English meaning used to disambiguate when a
+                        surface/reading maps to several dictionary entries
+                        (e.g. 〜くらい "about" vs 暗い "dark"). The entry whose
+                        glosses best match this string is chosen. Ignored when
+                        None or when nothing overlaps (falls back to entry_index).
 
     Returns
     -------
@@ -1552,8 +1662,8 @@ def create_card(
     """
     lang = detect_language(sentence)
     if lang in (Language.CHINESE_SIMPLIFIED, Language.CHINESE_TRADITIONAL):
-        return _create_chinese_card(word, sentence, source, cedict_path, entry_index, include_breakdown)
-    return _create_japanese_card(word, sentence, source, db_path, dic_path, entry_index, include_breakdown)
+        return _create_chinese_card(word, sentence, source, cedict_path, entry_index, include_breakdown, meaning)
+    return _create_japanese_card(word, sentence, source, db_path, dic_path, entry_index, include_breakdown, meaning)
 
 
 def create_image_card(
@@ -1566,6 +1676,7 @@ def create_image_card(
     entry_index: int = 0,
     include_breakdown: bool = True,
     language: Optional[Language] = None,
+    meaning: Optional[str] = None,
 ) -> Optional[ImageCardData]:
     """
     Build a Tango Tori Image card.
@@ -1585,6 +1696,10 @@ def create_image_card(
                         Auto-detected from the word when None. Note: a bare kanji
                         like 猫 has no kana to trigger Japanese detection, so pass
                         Language.JAPANESE explicitly when needed.
+    meaning           : Intended English meaning used to disambiguate when the
+                        word maps to several dictionary entries. The entry whose
+                        glosses best match this string is chosen. Ignored when
+                        None or when nothing overlaps (falls back to entry_index).
 
     Returns
     -------
@@ -1593,8 +1708,8 @@ def create_image_card(
     image_html = _normalize_image(image)
     lang = language if language is not None else detect_language(word)
     if lang in (Language.CHINESE_SIMPLIFIED, Language.CHINESE_TRADITIONAL):
-        return _create_chinese_image_card(word, image_html, source, cedict_path, entry_index, include_breakdown)
-    return _create_japanese_image_card(word, image_html, source, db_path, dic_path, entry_index, include_breakdown)
+        return _create_chinese_image_card(word, image_html, source, cedict_path, entry_index, include_breakdown, meaning)
+    return _create_japanese_image_card(word, image_html, source, db_path, dic_path, entry_index, include_breakdown, meaning)
 
 
 def _normalize_image(image: str) -> str:
@@ -1615,20 +1730,22 @@ def _create_japanese_card(
     dic_path: Optional[str | Path],
     entry_index: int,
     include_breakdown: bool = True,
+    meaning: Optional[str] = None,
 ) -> Optional[CardData]:
     db  = _get_db(db_path)
     tok = _get_tokenizer(dic_path)
 
     tokens = tok.tokenize(sentence)
+    match_word = _strip_affix_markers(word)
 
     target_token: Optional[Token] = None
     for t in tokens:
-        if t.surface == word or t.dictionary_form == word:
+        if t.surface == match_word or t.dictionary_form == match_word:
             target_token = t
             break
     if target_token is None:
         for t in tokens:
-            if word in t.surface or t.surface in word:
+            if match_word and (match_word in t.surface or t.surface in match_word):
                 target_token = t
                 break
     if target_token is None:
@@ -1636,10 +1753,10 @@ def _create_japanese_card(
 
     entries = db.lookup(target_token.dictionary_form, target_token.dictionary_reading)
     if not entries:
-        entries = db.lookup(word)
+        entries = db.lookup(match_word)
     if not entries:
         return None
-    entry = entries[min(entry_index, len(entries) - 1)]
+    entry = entries[_select_entry_index(entries, meaning, entry_index)]
 
     _UNLINKABLE = {PartOfSpeech.PUNCTUATION, PartOfSpeech.PARTICLE, PartOfSpeech.AUXILIARY_VERB}
     tokens_with_entries: list[TokenWithEntry] = []
@@ -1652,7 +1769,7 @@ def _create_japanese_card(
         tokens_with_entries.append(TokenWithEntry(token=t, entry_id=eid))
 
     word_str    = entry.headword
-    reading_str = entry.primary_reading
+    reading_str = _contextual_reading(target_token, entry)
     furigana    = build_furigana(word_str, reading_str)
 
     breakdown = _japanese_breakdown(word_str, furigana, db) if include_breakdown else ""
@@ -1680,20 +1797,22 @@ def _create_chinese_card(
     cedict_path: Optional[str | Path],
     entry_index: int,
     include_breakdown: bool = True,
+    meaning: Optional[str] = None,
 ) -> Optional[CardData]:
     cedict = _get_cedict(cedict_path)
     tok    = _get_cn_tokenizer()
 
     tokens = tok.tokenize(sentence)
+    match_word = _strip_affix_markers(word)
 
     target_token: Optional[Token] = None
     for t in tokens:
-        if t.surface == word or t.dictionary_form == word:
+        if t.surface == match_word or t.dictionary_form == match_word:
             target_token = t
             break
     if target_token is None:
         for t in tokens:
-            if word in t.surface or t.surface in word:
+            if match_word and (match_word in t.surface or t.surface in match_word):
                 target_token = t
                 break
     if target_token is None:
@@ -1701,12 +1820,12 @@ def _create_chinese_card(
 
     entries = cedict.lookup(target_token.dictionary_form)
     if not entries:
-        entries = cedict.lookup(word)
+        entries = cedict.lookup(match_word)
     if not entries:
-        entries = cedict.lookup_by_chars(word)
+        entries = cedict.lookup_by_chars(match_word)
     if not entries:
         return None
-    entry = entries[min(entry_index, len(entries) - 1)]
+    entry = entries[_select_entry_index(entries, meaning, entry_index)]
 
     _UNLINKABLE = {PartOfSpeech.PUNCTUATION, PartOfSpeech.PARTICLE, PartOfSpeech.AUXILIARY_VERB}
     tokens_with_entries: list[TokenWithEntry] = []
@@ -1753,20 +1872,22 @@ def _create_japanese_image_card(
     dic_path: Optional[str | Path],
     entry_index: int,
     include_breakdown: bool,
+    meaning: Optional[str] = None,
 ) -> Optional[ImageCardData]:
     db = _get_db(db_path)
+    match_word = _strip_affix_markers(word)
 
     # Direct lookup first; fall back to tokenizing the word if needed.
-    entries = db.lookup(word)
+    entries = db.lookup(match_word)
     if not entries:
         tok = _get_tokenizer(dic_path)
-        tokens = tok.tokenize(word)
+        tokens = tok.tokenize(match_word)
         if tokens:
             t = tokens[0]
             entries = db.lookup(t.dictionary_form, t.dictionary_reading)
     if not entries:
         return None
-    entry = entries[min(entry_index, len(entries) - 1)]
+    entry = entries[_select_entry_index(entries, meaning, entry_index)]
 
     word_str    = entry.headword
     reading_str = entry.primary_reading
@@ -1796,14 +1917,16 @@ def _create_chinese_image_card(
     cedict_path: Optional[str | Path],
     entry_index: int,
     include_breakdown: bool,
+    meaning: Optional[str] = None,
 ) -> Optional[ImageCardData]:
     cedict = _get_cedict(cedict_path)
-    entries = cedict.lookup(word)
+    match_word = _strip_affix_markers(word)
+    entries = cedict.lookup(match_word)
     if not entries:
-        entries = cedict.lookup_by_chars(word)
+        entries = cedict.lookup_by_chars(match_word)
     if not entries:
         return None
-    entry = entries[min(entry_index, len(entries) - 1)]
+    entry = entries[_select_entry_index(entries, meaning, entry_index)]
 
     word_str     = entry.headword
     pinyin_marks = entry.primary_reading

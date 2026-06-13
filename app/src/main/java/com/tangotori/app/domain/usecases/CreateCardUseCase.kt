@@ -16,6 +16,7 @@ import com.tangotori.app.domain.util.MeaningHtmlBuilder
 import com.tangotori.app.domain.util.PinyinBuilder
 import com.tangotori.app.domain.util.PinyinHtmlBuilder
 import com.tangotori.app.domain.util.SentenceHtmlBuilder
+import java.net.URLEncoder
 import javax.inject.Inject
 
 class CreateCardUseCase @Inject constructor(
@@ -75,6 +76,7 @@ class CreateCardUseCase @Inject constructor(
             sentenceRaw = sentence,
             source = source,
             kanjiBreakdownHtml = breakdown,
+            openUrl = openUrlFor(sentence),
         )
     }
 
@@ -115,8 +117,20 @@ class CreateCardUseCase @Inject constructor(
             sentenceRaw = sentence,
             source = source,
             kanjiBreakdownHtml = breakdownHtml,
+            openUrl = openUrlFor(sentence),
         )
     }
 
     suspend fun submit(card: CardData, deckId: Long) = anki.addCard(card, deckId)
+
+    /** Builds the `tangotori://sentence?text=…` deep link the Anki card's
+     *  "Open in Tango Tori" button uses. Pre-encoded here because Anki
+     *  templates have no URL-encode filter. `%20` (not `+`) for spaces so
+     *  Uri.getQueryParameter decodes it back correctly on the receiving side. */
+    private fun openUrlFor(sentence: String): String {
+        val trimmed = sentence.trim()
+        if (trimmed.isEmpty()) return ""
+        val encoded = URLEncoder.encode(trimmed, "UTF-8").replace("+", "%20")
+        return "tangotori://sentence?text=$encoded"
+    }
 }

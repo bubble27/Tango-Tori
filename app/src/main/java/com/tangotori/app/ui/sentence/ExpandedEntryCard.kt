@@ -153,6 +153,24 @@ fun ExpandedEntryCard(
                     loadKanjiBreakdown = loadKanjiBreakdown,
                 )
                 lookup.entries.isNullOrEmpty() -> EmptyRow()
+                // Grouped idiom (腹が立つ): the idiom entry at top, then each
+                // component word (腹 / が / 立つ) as its own sub-card below.
+                token.isIdiomGroup -> IdiomGroupBody(
+                    token = token,
+                    entries = lookup.entries,
+                    componentEntries = lookup.componentEntries,
+                    inExpressionLoading = lookup.inExpressionLoading,
+                    defaultDeckName = defaultDeckName,
+                    cardAddState = cardAddState,
+                    linkToKanjiStudy = linkToKanjiStudy,
+                    inContext = lookup.inContext,
+                    inContextLoading = lookup.inContextLoading,
+                    inContextLimitReached = lookup.inContextLimitReached,
+                    onAddToDefaultDeck = onAddToDefaultDeck,
+                    onChooseDeck = onChooseDeck,
+                    onToggleLinkStyle = onToggleLinkStyle,
+                    loadKanjiBreakdown = loadKanjiBreakdown,
+                )
                 else -> EntryBody(
                     token = token,
                     entries = lookup.entries,
@@ -161,6 +179,7 @@ fun ExpandedEntryCard(
                     linkToKanjiStudy = linkToKanjiStudy,
                     inContext = lookup.inContext,
                     inContextLoading = lookup.inContextLoading,
+                    inContextLimitReached = lookup.inContextLimitReached,
                     onAddToDefaultDeck = onAddToDefaultDeck,
                     onChooseDeck = onChooseDeck,
                     onToggleLinkStyle = onToggleLinkStyle,
@@ -190,6 +209,178 @@ private fun EmptyRow() {
     )
 }
 
+/**
+ * Grouped-idiom body, mirroring the Chinese [CompoundEntryCard]: the idiom's own
+ * JMdict entry (senses + in-context meaning + add button) at the top, then each
+ * component word as its own sub-card below, separated by dividers.
+ */
+@Composable
+private fun IdiomGroupBody(
+    token: Token,
+    entries: List<DictEntry>,
+    componentEntries: List<ComponentEntries>,
+    inExpressionLoading: Boolean,
+    defaultDeckName: String?,
+    cardAddState: CardAddState,
+    linkToKanjiStudy: Boolean,
+    inContext: InContextSense?,
+    inContextLoading: Boolean,
+    inContextLimitReached: Boolean,
+    onAddToDefaultDeck: (Token, DictEntry) -> Unit,
+    onChooseDeck: (Token, DictEntry) -> Unit,
+    onToggleLinkStyle: () -> Unit,
+    loadKanjiBreakdown: suspend (DictEntry) -> List<KanjiTile>,
+) {
+    // The idiom itself as a normal word entry (headword is the colored
+    // WordListItem card above; this is senses + in-context + add button).
+    EntryBody(
+        token = token,
+        entries = entries,
+        defaultDeckName = defaultDeckName,
+        cardAddState = cardAddState,
+        linkToKanjiStudy = linkToKanjiStudy,
+        inContext = inContext,
+        inContextLoading = inContextLoading,
+        inContextLimitReached = inContextLimitReached,
+        onAddToDefaultDeck = onAddToDefaultDeck,
+        onChooseDeck = onChooseDeck,
+        onToggleLinkStyle = onToggleLinkStyle,
+        loadKanjiBreakdown = loadKanjiBreakdown,
+    )
+
+    if (componentEntries.isNotEmpty()) {
+        // Idioms read as an "expression"; decomposed compounds read as a
+        // "compound" with "morphemic" part meanings.
+        val sectionHeader = if (token.isExpression) "WORDS IN THIS EXPRESSION" else "COMPOUND PARTS"
+        val partMeaningLabel = if (token.isExpression) "In-expression meaning" else "Morphemic meaning"
+        Spacer(Modifier.height(14.dp))
+        HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f))
+        Spacer(Modifier.height(12.dp))
+        Text(
+            sectionHeader,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.SemiBold,
+            letterSpacing = 0.8.sp,
+            color = MutedNoteColor,
+        )
+        componentEntries.forEachIndexed { i, comp ->
+            Spacer(Modifier.height(14.dp))
+            // In a compound, an UNchanging part (高校, 経済) doesn't need a
+            // morphemic gloss — only the red sense highlight. Bound affixes
+            // (生, 的, 化) do. Idiom parts always show their in-expression meaning.
+            val showMeaning = token.isExpression || comp.token.isBoundAffix
+            IdiomPartCard(
+                token = comp.token,
+                entries = comp.entries,
+                meaning = if (showMeaning) comp.meaning else null,
+                meaningLoading = showMeaning && inExpressionLoading && comp.meaning == null,
+                meaningLabel = partMeaningLabel,
+                senseIndex = comp.senseIndex,
+                defaultDeckName = defaultDeckName,
+                cardAddState = cardAddState,
+                onAddToDefaultDeck = onAddToDefaultDeck,
+                onChooseDeck = onChooseDeck,
+                loadKanjiBreakdown = loadKanjiBreakdown,
+            )
+            if (i < componentEntries.lastIndex) {
+                Spacer(Modifier.height(14.dp))
+                HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
+            }
+        }
+    }
+}
+
+/** One component word inside a grouped idiom: headword + reading + senses +
+ *  add-to-deck. No in-context meaning (only the group gets that). */
+@Composable
+private fun IdiomPartCard(
+    token: Token,
+    entries: List<DictEntry>,
+    meaning: String?,
+    meaningLoading: Boolean,
+    meaningLabel: String,
+    senseIndex: Int?,
+    defaultDeckName: String?,
+    cardAddState: CardAddState,
+    onAddToDefaultDeck: (Token, DictEntry) -> Unit,
+    onChooseDeck: (Token, DictEntry) -> Unit,
+    loadKanjiBreakdown: suspend (DictEntry) -> List<KanjiTile>,
+) {
+    // Bound suffix/prefix parts (生 in 高校生) display with a tilde: ~生.
+    val headword = token.partLabel
+    if (entries.isEmpty()) {
+        Text(headword, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+        if (token.dictionaryReading.isNotBlank() && token.dictionaryReading != token.dictionaryForm) {
+            Text(
+                token.dictionaryReading,
+                fontSize = 13.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+            )
+        }
+        Spacer(Modifier.height(4.dp))
+        InExpressionSection(label = meaningLabel, loading = meaningLoading, meaning = meaning)
+        if (meaning == null && !meaningLoading) {
+            Text(
+                "No dictionary entry found.",
+                fontSize = 13.sp,
+                fontStyle = FontStyle.Italic,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f),
+            )
+        }
+        return
+    }
+
+    var selectedIdx by rememberSaveable(entries.map { it.id }) { mutableIntStateOf(0) }
+    if (entries.size > 1) {
+        EntryTabs(entries = entries, selectedIdx = selectedIdx, onSelect = { selectedIdx = it })
+        Spacer(Modifier.height(8.dp))
+    }
+    val entry = entries[selectedIdx.coerceIn(0, entries.lastIndex)]
+
+    Text(headword, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+    val reading = entry.primaryReading
+    if (reading.isNotBlank() && reading != token.dictionaryForm) {
+        Text(
+            reading,
+            fontSize = 13.sp,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
+        )
+    }
+    Spacer(Modifier.height(6.dp))
+
+    // The AI "as a part" meaning sits above the literal dictionary senses.
+    InExpressionSection(label = meaningLabel, loading = meaningLoading, meaning = meaning)
+
+    EntryDetail(
+        token = token,
+        entry = entry,
+        inContextLoading = false,
+        inContextMeaning = null,
+        inContextLimitReached = false,
+        // The matched sense applies to the displayed (first) entry only.
+        contextSenseIndex = if (selectedIdx == 0) senseIndex else null,
+        loadKanjiBreakdown = loadKanjiBreakdown,
+    )
+
+    Spacer(Modifier.height(10.dp))
+    AddToDeckButton(
+        deckName = defaultDeckName,
+        entryId = entry.id,
+        cardAddState = cardAddState,
+        onAdd = { onAddToDefaultDeck(token, entry) },
+        height = 44.dp,
+        fontSize = 13.sp,
+    ) { dismiss ->
+        DropdownMenuItem(
+            text = { Text("Choose deck") },
+            onClick = {
+                dismiss()
+                onChooseDeck(token, entry)
+            },
+        )
+    }
+}
+
 @Composable
 private fun EntryBody(
     token: Token,
@@ -199,6 +390,7 @@ private fun EntryBody(
     linkToKanjiStudy: Boolean,
     inContext: InContextSense?,
     inContextLoading: Boolean,
+    inContextLimitReached: Boolean,
     onAddToDefaultDeck: (Token, DictEntry) -> Unit,
     onChooseDeck: (Token, DictEntry) -> Unit,
     onToggleLinkStyle: () -> Unit,
@@ -240,6 +432,7 @@ private fun EntryBody(
         entry = entry,
         inContextLoading = inContextLoading && inContext == null,
         inContextMeaning = if (isChosenEntry) inContext!!.meaning else null,
+        inContextLimitReached = inContextLimitReached,
         contextSenseIndex = if (isChosenEntry) inContext!!.senseIndex else null,
         loadKanjiBreakdown = loadKanjiBreakdown,
     )
@@ -358,6 +551,7 @@ private fun EntryDetail(
     entry: DictEntry,
     inContextLoading: Boolean,
     inContextMeaning: String?,
+    inContextLimitReached: Boolean,
     contextSenseIndex: Int?,
     loadKanjiBreakdown: suspend (DictEntry) -> List<KanjiTile>,
 ) {
@@ -368,7 +562,11 @@ private fun EntryDetail(
     // In-context meaning section (the LLM's read of how this word is used in the
     // current sentence), shown at the very top like the compound "Tango Tori
     // Meaning" block.
-    InContextSection(loading = inContextLoading, meaning = inContextMeaning)
+    InContextSection(
+        loading = inContextLoading,
+        meaning = inContextMeaning,
+        limitReached = inContextLimitReached,
+    )
 
     // Senses — POS subtitle per group, then any misc/field/dialect notes,
     // then numbered glosses. Order matters: notes belong BETWEEN the POS
@@ -643,6 +841,18 @@ private fun CompoundEntryCard(
         )
         is MeaningResult.Failed -> Text(
             "Meaning unavailable",
+            fontSize = 13.sp,
+            fontStyle = FontStyle.Italic,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f),
+        )
+        // Daily free limit: the notice is shown once per day; later misses
+        // render nothing (cache hits still come back as Success).
+        is MeaningResult.LimitReached -> if (compoundMeaningResult.showMessage) {
+            DailyLimitNotice()
+        }
+        // Privacy opt-out: no request was made.
+        is MeaningResult.AiDisabled -> Text(
+            "AI features are turned off",
             fontSize = 13.sp,
             fontStyle = FontStyle.Italic,
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f),
@@ -1331,9 +1541,13 @@ private fun SenseLine(
  *  call is in flight, then the LLM's contextual gloss. Styled like the compound
  *  "Tango Tori Meaning" section. */
 @Composable
-private fun InContextSection(loading: Boolean, meaning: String?) {
-    if (!loading && meaning == null) return
-    if (meaning != null) {
+private fun InContextSection(loading: Boolean, meaning: String?, limitReached: Boolean = false) {
+    if (!loading && meaning == null && !limitReached) return
+    if (limitReached) {
+        // One-time daily-limit notice shown in place of the contextual gloss;
+        // subsequent lookups while over the limit render nothing here.
+        DailyLimitNotice()
+    } else if (meaning != null) {
         Text(
             "In-context meaning",
             fontSize = 11.sp,
@@ -1356,5 +1570,30 @@ private fun InContextSection(loading: Boolean, meaning: String?) {
     Spacer(Modifier.height(12.dp))
     HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.10f))
     Spacer(Modifier.height(10.dp))
+}
+
+/** A component part's "in-expression meaning" (the AI's read of what the part
+ *  contributes inside the idiom/compound): shimmer while loading, then the
+ *  gloss. Styled like [InContextSection] but without the trailing divider. */
+@Composable
+private fun InExpressionSection(label: String, loading: Boolean, meaning: String?) {
+    if (!loading && meaning == null) return
+    Text(
+        label,
+        fontSize = 11.sp,
+        fontWeight = FontWeight.SemiBold,
+        color = MutedNoteColor,
+    )
+    Spacer(Modifier.height(4.dp))
+    if (meaning != null) {
+        Text(meaning, fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface)
+    } else {
+        BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+            val widthPx = with(LocalDensity.current) { maxWidth.toPx() }
+            val brush = shimmerBrush(widthPx)
+            SkeletonBar(brush, widthFraction = 0.7f, height = 14.dp)
+        }
+    }
+    Spacer(Modifier.height(8.dp))
 }
 

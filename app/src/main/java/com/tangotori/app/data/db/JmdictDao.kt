@@ -32,4 +32,15 @@ interface JmdictDao {
 
     @Query("SELECT * FROM kanji_dic WHERE character = :c")
     suspend fun getKanjiDic(c: String): KanjiDicRow?
+
+    /**
+     * True if [form] (matched on kanji OR reading) is a JMdict entry tagged as
+     * an expression (`exp`) — idioms and set phrases like 腹が立つ / 気の利いた.
+     * Ordinary noun compounds are tagged `n`, not `exp`, so they don't match.
+     * Used by the idiom grouper to decide which token spans to merge.
+     */
+    @Query("SELECT EXISTS(SELECT 1 FROM senses WHERE partOfSpeech LIKE '%exp%' AND entryId IN (" +
+            "SELECT entryId FROM kanji WHERE text = :form " +
+            "UNION SELECT entryId FROM readings WHERE text = :form))")
+    suspend fun existsExpressionForm(form: String): Boolean
 }

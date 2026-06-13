@@ -13,6 +13,14 @@ val localProps = Properties().apply {
     if (f.exists()) load(f.inputStream())
 }
 
+// Release upload-key signing. Provisioned via a gitignored keystore.properties
+// at the repo root (storeFile / storePassword / keyAlias / keyPassword). Absent
+// on CI / other machines, in which case release falls back to debug signing.
+val keystoreProps = Properties().apply {
+    val f = rootProject.file("keystore.properties")
+    if (f.exists()) load(f.inputStream())
+}
+
 // Export Room schema JSON so the jmdict-builder tool can read the
 // identityHash + DDL and emit a prepackaged DB that Room accepts.
 ksp {
@@ -38,6 +46,17 @@ android {
         buildConfigField("String", "COMPOUND_API_URL", "\"$compoundApiUrl\"")
     }
 
+    signingConfigs {
+        if (keystoreProps.getProperty("storeFile") != null) {
+            create("release") {
+                storeFile = rootProject.file(keystoreProps.getProperty("storeFile"))
+                storePassword = keystoreProps.getProperty("storePassword")
+                keyAlias = keystoreProps.getProperty("keyAlias")
+                keyPassword = keystoreProps.getProperty("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
             // R8 minification + shrinking. Enables AOT compilation at install
@@ -49,10 +68,11 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            // Sign with the debug keystore so `./gradlew :app:installRelease`
-            // works without provisioning a release keystore. Same signature as
-            // the existing installed debug build (no uninstall needed).
-            signingConfig = signingConfigs.getByName("debug")
+            // Sign with the release upload key when keystore.properties is present
+            // (required for Play Store uploads); otherwise fall back to debug so
+            // `./gradlew :app:installRelease` still works on machines without it.
+            signingConfig = signingConfigs.findByName("release")
+                ?: signingConfigs.getByName("debug")
         }
     }
     compileOptions {
@@ -112,6 +132,10 @@ dependencies {
     implementation(libs.sudachi)
     implementation(libs.jieba)
     implementation(libs.pinyin4j)
+
+    // Google Play Billing 8 — one-time usage-boost purchases (8x / 20x daily
+    // limit). Satisfies Play's Billing-Library-8.0+ requirement (Aug 31, 2026).
+    implementation(libs.billing.ktx)
 
     // AnkiDroid API via JitPack — used for Stage 3.
     // If the JitPack resolution fails locally, comment this out and the

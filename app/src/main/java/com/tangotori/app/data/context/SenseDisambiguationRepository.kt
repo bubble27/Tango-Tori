@@ -1,6 +1,8 @@
 package com.tangotori.app.data.context
 
 import com.tangotori.app.BuildConfig
+import com.tangotori.app.data.budget.ApiKeyStore
+import com.tangotori.app.data.budget.UsageBudgetManager
 import com.tangotori.app.data.compound.DeviceIdProvider
 import com.tangotori.app.domain.models.DictEntry
 import kotlinx.coroutines.Dispatchers
@@ -27,6 +29,11 @@ sealed class DisambiguationResult {
     ) : DisambiguationResult()
     data object NoInternet : DisambiguationResult()
     data object Failed : DisambiguationResult()
+    /** The device spent its daily free token budget (worker replied 429, or the
+     *  request was skipped because the limit is already known to be hit).
+     *  [showMessage] is true only for the first notice of the day — the UI
+     *  shows the limit message once, then later failures stay silent. */
+    data class LimitReached(val showMessage: Boolean) : DisambiguationResult()
 }
 
 /**
@@ -37,6 +44,8 @@ sealed class DisambiguationResult {
 @Singleton
 class SenseDisambiguationRepository @Inject constructor(
     private val deviceIdProvider: DeviceIdProvider,
+    private val budgetManager: UsageBudgetManager,
+    private val apiKeyStore: ApiKeyStore,
 ) {
     /**
      * @param language "ja" or "zh".
@@ -73,12 +82,28 @@ class SenseDisambiguationRepository @Inject constructor(
         // context-aware gloss (id is trivially that one); 0 means nothing to do.
         if (map.isEmpty()) return@withContext DisambiguationResult.Failed
 
+        // Bring-your-own-key: billed to the user's key, no budget applies.
+        val userKey = apiKeyStore.getKey()
+
+        // Once the daily free limit is known to be hit, don't send disambiguation
+        // requests at all until it lifts (UTC day rollover, Dev Mode re-enabled,
+        // a boost purchase, or the user adding their own key).
+        val devActive = budgetManager.isDevActive()
+        if (userKey == null && !devActive && budgetManager.isLimitBlocked()) {
+            return@withContext DisambiguationResult.LimitReached(
+                showMessage = budgetManager.consumeLimitNotice(),
+            )
+        }
+
         val body = JSONObject().apply {
             put("device_id", deviceIdProvider.deviceId)
             put("language", language)
             put("word", word)
             put("sentence", sentence)
             put("candidates", candidates)
+            put("dev_mode", devActive)
+            if (userKey != null) put("api_key", userKey)
+            budgetManager.currentTier().let { if (it > 1) put("budget_tier", it) }
         }.toString()
 
         try {
@@ -92,6 +117,12 @@ class SenseDisambiguationRepository @Inject constructor(
 
             conn.outputStream.use { it.write(body.toByteArray()) }
 
+            if (conn.responseCode == 429) {
+                budgetManager.markLimitReached()
+                return@withContext DisambiguationResult.LimitReached(
+                    showMessage = budgetManager.consumeLimitNotice(),
+                )
+            }
             if (conn.responseCode != 200) return@withContext DisambiguationResult.Failed
 
             val response = conn.inputStream.bufferedReader().readText()

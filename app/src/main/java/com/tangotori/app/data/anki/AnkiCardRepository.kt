@@ -154,6 +154,7 @@ class AnkiCardRepository @Inject constructor(
               <div class="meaning">{{Meaning}}</div>
               <hr>
               {{#Sentence}}<div class="sentence">{{Sentence}}</div>{{/Sentence}}
+              {{#OpenUrl}}<div class="open-in-app"><a href="{{OpenUrl}}">Open in Tango Tori</a></div>{{/OpenUrl}}
             </div>
         """
 
@@ -199,6 +200,18 @@ class AnkiCardRepository @Inject constructor(
             .sentence rt { color: #5A6B75; font-size: 0.55em; }
             .sentence .target-word { color: #C0392B; font-weight: normal; }
             .sentence .target-word a { color: #C0392B; }
+            /* "Open in Tango Tori" deep-link button under the sentence. Reopens
+               this sentence in the app (handled by the tangotori:// scheme). */
+            .open-in-app { text-align: center; margin: 16px 0 4px 0; }
+            .open-in-app a {
+              display: inline-block;
+              padding: 9px 20px;
+              font-size: 15px;
+              color: #FFFFFF;
+              background: #C0392B;
+              border-radius: 22px;
+              text-decoration: none;
+            }
             hr {
               border: none;
               border-top: 1px solid #DDD;
@@ -266,6 +279,7 @@ class AnkiCardRepository @Inject constructor(
             .night_mode .senses li::marker { color: #BBB; }
             .night_mode .sentence .target-word,
             .night_mode .sentence .target-word a { color: #E07B6A; }
+            .night_mode .open-in-app a { background: #E07B6A; color: #1A1A1A; }
         """
 
         // ── Image card ────────────────────────────────────────────────────────

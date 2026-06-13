@@ -38,7 +38,7 @@ class MainActivity : ComponentActivity() {
         window.attributes = window.attributes.apply {
             preferredRefreshRate = 120f
         }
-        handleShareIntent(intent)
+        handleIncomingIntent(intent)
         setContent {
             TangoToriTheme {
                 Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
@@ -49,21 +49,35 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * Activity is `singleTop`, so subsequent ACTION_SEND intents arrive here
-     * instead of creating a new instance — keeping a single VM scope and
-     * letting the user share sentence after sentence without reopening the app.
+     * Activity is `singleTop`, so subsequent ACTION_SEND / deep-link intents
+     * arrive here instead of creating a new instance — keeping a single VM
+     * scope and letting the user open sentence after sentence without
+     * reopening the app.
      */
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        handleShareIntent(intent)
+        handleIncomingIntent(intent)
     }
 
-    private fun handleShareIntent(intent: Intent?) {
-        if (intent?.action != Intent.ACTION_SEND) return
-        if (intent.type != "text/plain") return
-        val text = intent.getStringExtra(Intent.EXTRA_TEXT)?.trim().orEmpty()
-        if (text.isEmpty()) return
-        incoming.submit(text)
+    /**
+     * Routes the two ways a sentence enters the app from outside:
+     *  - ACTION_SEND: shared plain text (system share sheet).
+     *  - ACTION_VIEW on a `tangotori://sentence?text=…` deep link, fired by the
+     *    "Open in Tango Tori" button on Anki cards.
+     */
+    private fun handleIncomingIntent(intent: Intent?) {
+        when (intent?.action) {
+            Intent.ACTION_SEND -> {
+                if (intent.type != "text/plain") return
+                val text = intent.getStringExtra(Intent.EXTRA_TEXT)?.trim().orEmpty()
+                if (text.isNotEmpty()) incoming.submit(text, fromDeepLink = false)
+            }
+            Intent.ACTION_VIEW -> {
+                if (intent.data?.scheme != "tangotori") return
+                val text = intent.data?.getQueryParameter("text")?.trim().orEmpty()
+                if (text.isNotEmpty()) incoming.submit(text, fromDeepLink = true)
+            }
+        }
     }
 }

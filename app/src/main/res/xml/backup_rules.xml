@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Pre-Android-12 backup config: never back up the encrypted user API key.
+     (The ciphertext would be useless on another device anyway — the AES key
+     lives in this device's hardware keystore — but excluding it is tidier.) -->
+<full-backup-content>
+    <exclude domain="sharedpref" path="secure_prefs.xml" />
+</full-backup-content>

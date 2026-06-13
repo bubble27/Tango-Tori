@@ -5,6 +5,10 @@ Reads jlpt_n5_sentences.csv (columns: word, reading, meaning, character,
 example_sentence) and creates one "Tango Tori v5" card per row using the
 full format: kanji breakdown, furigana, sentence HTML with ruby and links.
 
+Entry selection: each row's `meaning` column disambiguates homophones so the
+correct JMdict entry is chosen (e.g. 〜くらい "about" not 暗い "dark", 〜側 "side"
+not そば "near by"), and the sentence-contextual reading is honored (月 → がつ).
+
 Verb forms: words given in polite ます form are converted to their dictionary
 form by running them through Sudachi, which handles all conjugation patterns
 correctly. The JMdict entry for the dictionary form is used for the card.
@@ -29,13 +33,16 @@ from tango_tori import (
     CardData,
     PartOfSpeech,
     TokenWithEntry,
+    _contextual_reading,
     _get_db,
     _get_tokenizer,
     _japanese_breakdown,
+    _select_entry_index,
     build_furigana,
     build_furigana_html,
     build_meaning_html,
     build_sentence_html,
+    create_card,
 )
 
 # ─── Paths ────────────────────────────────────────────────────────────────────
@@ -186,7 +193,18 @@ def _lookup_entry(cleaned: str, reading: str, db, tok):
     return []
 
 
-def _build_card(entry, sentence: str, db, tok) -> CardData:
+def _find_target_token(cleaned: str, sent_tokens):
+    """Locate the token in the sentence that corresponds to the target word."""
+    for t in sent_tokens:
+        if t.surface == cleaned or t.dictionary_form == cleaned:
+            return t
+    for t in sent_tokens:
+        if cleaned and (cleaned in t.surface or t.surface in cleaned):
+            return t
+    return None
+
+
+def _build_card(entry, cleaned: str, sentence: str, db, tok) -> CardData:
     """Build a CardData from a JMdict entry + sentence string."""
     sent_tokens = tok.tokenize(sentence)
 
@@ -200,7 +218,8 @@ def _build_card(entry, sentence: str, db, tok) -> CardData:
         tokens_with_entries.append(TokenWithEntry(token=t, entry_id=eid))
 
     word_str    = entry.headword
-    reading_str = entry.primary_reading
+    # Honor the sentence-contextual reading (e.g. 月 → がつ) when available.
+    reading_str = _contextual_reading(_find_target_token(cleaned, sent_tokens), entry)
     furigana    = build_furigana(word_str, reading_str)
     breakdown   = _japanese_breakdown(word_str, furigana, db)
 
@@ -255,16 +274,24 @@ def main() -> None:
         word_csv    = row["word"]
         reading_csv = _clean_reading(row["reading"])
         sentence    = row["example_sentence"]
+        meaning_csv = row["meaning"]
 
-        cleaned = _clean_word(word_csv)
-        entries = _lookup_entry(cleaned, reading_csv, db, tok)
+        # Primary path: the corrected create_card API, which disambiguates the
+        # entry by meaning and honors the sentence-contextual reading.
+        card = create_card(word_csv, sentence, source="JLPT N5", meaning=meaning_csv)
 
-        if not entries:
-            counts["skip"] += 1
-            skipped.append(word_csv)
-            continue
+        # Fallback: direct dictionary lookup (handles ます verbs and rows whose
+        # word never appears verbatim in the sentence), still meaning-aware.
+        if card is None:
+            cleaned = _clean_word(word_csv)
+            entries = _lookup_entry(cleaned, reading_csv, db, tok)
+            if not entries:
+                counts["skip"] += 1
+                skipped.append(word_csv)
+                continue
+            entry = entries[_select_entry_index(entries, meaning_csv, 0)]
+            card = _build_card(entry, cleaned, sentence, db, tok)
 
-        card = _build_card(entries[0], sentence, db, tok)
         note = genanki.Note(
             model=model,
             fields=card.to_field_array(),

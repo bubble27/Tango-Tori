@@ -3,15 +3,24 @@ main = "src/index.ts"
 compatibility_date = "2025-01-01"
 workers_dev = true
 
+# Nightly data-retention sweep (03:10 UTC): deletes disambiguation_cache rows
+# (user sentences) and daily_token_cost rows older than 7 days. See the
+# `scheduled` handler in src/index.ts.
+[triggers]
+crons = ["10 3 * * *"]
+
 [[d1_databases]]
 binding = "DB"
 database_name = "tango-tori-compounds"
 database_id = "1b48c5ed-1dd1-4cc4-a4da-f018cecfcbc3"
 
 [vars]
-RATE_LIMIT_PER_DAY = "100"
-# BYPASS_DEVICE_IDS: comma-separated device_ids exempt from the daily rate
-# limit (e.g. your own dev phone). Do NOT commit real ids — they would let
-# anyone bypass the limit on your deployed worker. Set it as a secret:
+# Per-device daily token-cost budget, in micro-USD (millionths of a dollar).
+# We meter the real Anthropic token cost of each LLM call and cap it here,
+# rather than counting requests. 10000 = $0.01 = ~1 cent of tokens per day.
+DAILY_BUDGET_MICRO_USD = "10000"
+# BYPASS_DEVICE_IDS: comma-separated device_ids exempt from the daily budget
+# (e.g. your own dev phone). Do NOT commit real ids — they would let anyone
+# bypass the budget on your deployed worker. Set it as a secret:
 #   wrangler secret put BYPASS_DEVICE_IDS
 # The worker reads it from env; if unset, no device is exempted.

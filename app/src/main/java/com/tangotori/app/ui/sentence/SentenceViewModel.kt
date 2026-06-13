@@ -8,7 +8,11 @@ import com.tangotori.app.data.anki.AnkiCardRepository
 import com.tangotori.app.data.anki.AnkiPreferences
 import com.tangotori.app.data.compound.CompoundMeaningRepository
 import com.tangotori.app.data.context.DisambiguationResult
+import com.tangotori.app.data.context.ExpressionPartsRepository
 import com.tangotori.app.data.context.SenseDisambiguationRepository
+import com.tangotori.app.data.billing.BillingRepository
+import com.tangotori.app.data.budget.ApiKeyStore
+import com.tangotori.app.data.budget.UsageBudgetManager
 import com.tangotori.app.data.history.SentenceHistoryRepository
 import com.tangotori.app.data.settings.AppPreferences
 import com.tangotori.app.data.compound.MeaningResult
@@ -65,6 +69,26 @@ data class EntryLookup(
     val inContextLoading: Boolean = false,
     /** Resolved most-relevant sense for the sentence (null until/unless found). */
     val inContext: InContextSense? = null,
+    /** Show the one-time "daily free limit reached" notice in the in-context
+     *  meaning slot (true only for the first limit failure of the day). */
+    val inContextLimitReached: Boolean = false,
+    /** For a grouped idiom token: each component word with its own JMdict
+     *  entries, rendered as sub-cards below the idiom (like Chinese compounds). */
+    val componentEntries: List<ComponentEntries> = emptyList(),
+    /** The AI "in-expression meaning" call for the components is in flight. */
+    val inExpressionLoading: Boolean = false,
+)
+
+/** A component word of a grouped idiom/compound, with its own JMdict entries and
+ *  its AI-generated meaning *as used within the expression* (null until/unless
+ *  fetched). */
+data class ComponentEntries(
+    val token: Token,
+    val entries: List<DictEntry>,
+    val meaning: String? = null,
+    /** 0-based sense index of [entries]`[0]` that matches the in-expression use,
+     *  highlighted in red (null = none). */
+    val senseIndex: Int? = null,
 )
 
 /** The dictionary sense the LLM judged most relevant to the current sentence,
@@ -137,6 +161,10 @@ class SentenceViewModel @Inject constructor(
     private val cedictRepo: CedictRepository,
     private val compoundMeaningRepo: CompoundMeaningRepository,
     private val senseDisambiguation: SenseDisambiguationRepository,
+    private val expressionParts: ExpressionPartsRepository,
+    private val budgetManager: UsageBudgetManager,
+    private val apiKeyStore: ApiKeyStore,
+    private val billing: BillingRepository,
     private val savedState: SavedStateHandle,
 ) : ViewModel() {
 
@@ -199,6 +227,115 @@ class SentenceViewModel @Inject constructor(
 
     val recentSentences: StateFlow<List<String>> = historyRepo.recentSentences
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    // "About" dialog visibility. Auto-shown once on the very first app launch
+    // (see init), and openable any time from the home-screen info button.
+    private val _showInfo = MutableStateFlow(false)
+    val showInfo: StateFlow<Boolean> = _showInfo.asStateFlow()
+
+    // ── Dev Mode ─────────────────────────────────────────────────────────────
+    // The Dev Mode toggle appears in the About dialog only on a dev device
+    // (one on the worker's bypass list — checked once per launch in init).
+    // Toggle ON → unmetered; OFF → metered like a free user.
+    val isDevDevice: StateFlow<Boolean> = budgetManager.isDevDevice
+    val devModeEnabled: StateFlow<Boolean> = appPrefs.devModeEnabled
+        .stateIn(viewModelScope, SharingStarted.Eagerly, true)
+
+    fun setDevMode(enabled: Boolean) {
+        viewModelScope.launch {
+            appPrefs.setDevModeEnabled(enabled)
+            // Re-enabling Dev Mode lifts the local daily-limit block immediately.
+            if (enabled) budgetManager.clearLimit()
+        }
+    }
+
+    // ── AI features opt-out ──────────────────────────────────────────────────
+    // OFF = privacy mode: no lookup content, device id, or purchase token is
+    // ever sent anywhere; everything stays on-device (see PRIVACY_POLICY.md).
+    val aiEnabled: StateFlow<Boolean> = appPrefs.aiFeaturesEnabled
+        .stateIn(viewModelScope, SharingStarted.Eagerly, true)
+
+    fun setAiEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            appPrefs.setAiFeaturesEnabled(enabled)
+            // The launch-time dev-status check is skipped while opted out;
+            // run it now that backend communication is allowed again.
+            if (enabled) budgetManager.refreshDevStatus()
+        }
+    }
+
+    // ── Usage limits / purchases screen ──────────────────────────────────────
+    private val _showUsageInfo = MutableStateFlow(false)
+    val showUsageInfo: StateFlow<Boolean> = _showUsageInfo.asStateFlow()
+
+    fun openUsageInfo() {
+        _showUsageInfo.value = true
+        billing.refresh() // load live prices / entitlements for the screen
+    }
+
+    fun dismissUsageInfo() {
+        _showUsageInfo.value = false
+        _keySaveState.value = KeySaveState.IDLE
+    }
+
+    /** Bring-your-own-key save flow state for the usage screen. */
+    enum class KeySaveState { IDLE, CHECKING, SAVED, INVALID, NETWORK_ERROR }
+
+    private val _keySaveState = MutableStateFlow(KeySaveState.IDLE)
+    val keySaveState: StateFlow<KeySaveState> = _keySaveState.asStateFlow()
+
+    val hasUserApiKey: StateFlow<Boolean> = apiKeyStore.hasKey
+
+    /** Validates the key against Anthropic, then stores it encrypted. */
+    fun saveUserApiKey(key: String) {
+        if (key.isBlank() || _keySaveState.value == KeySaveState.CHECKING) return
+        _keySaveState.value = KeySaveState.CHECKING
+        viewModelScope.launch {
+            when (apiKeyStore.validate(key)) {
+                ApiKeyStore.Validation.VALID -> {
+                    apiKeyStore.saveKey(key)
+                    budgetManager.clearLimit() // user is now self-funded
+                    _keySaveState.value = KeySaveState.SAVED
+                }
+                ApiKeyStore.Validation.INVALID ->
+                    _keySaveState.value = KeySaveState.INVALID
+                ApiKeyStore.Validation.NETWORK_ERROR ->
+                    _keySaveState.value = KeySaveState.NETWORK_ERROR
+            }
+        }
+    }
+
+    fun removeUserApiKey() {
+        apiKeyStore.clearKey()
+        _keySaveState.value = KeySaveState.IDLE
+    }
+
+    // Billing state for the usage screen.
+    val usageTier: StateFlow<Int> = billing.tier
+    val ownsBase8x: StateFlow<Boolean> = billing.ownsBase8x
+    val billingProducts = billing.products
+    val billingReady: StateFlow<Boolean> = billing.billingReady
+    val billingMessage: StateFlow<String?> = billing.message
+
+    fun purchaseBoost(activity: android.app.Activity, productId: String) =
+        billing.launchPurchase(activity, productId)
+
+    fun restorePurchases() = billing.refresh()
+    fun consumeBillingMessage() = billing.consumeMessage()
+
+    fun openInfo() { _showInfo.value = true }
+
+    // True while viewing a sentence that was opened from the Anki "Open in
+    // Tango Tori" deep link. Drives back: such a sentence returns to AnkiDroid
+    // on back rather than the home screen. Cleared once the user navigates
+    // within the app (edit, type, or load a different sentence normally).
+    private val _cameFromDeepLink = MutableStateFlow(false)
+    val cameFromDeepLink: StateFlow<Boolean> = _cameFromDeepLink.asStateFlow()
+
+    fun dismissInfo() {
+        _showInfo.value = false
+        viewModelScope.launch { appPrefs.markInfoSeen() }
+    }
 
     private val _state = MutableStateFlow(SentenceUiState(
         input = savedState["input"] ?: "",
@@ -285,7 +422,7 @@ class SentenceViewModel @Inject constructor(
             .launchIn(viewModelScope)
 
         incomingBus.events
-            .onEach { acceptSharedSentence(it) }
+            .onEach { acceptSharedSentence(it.text, fromDeepLink = it.fromDeepLink) }
             .launchIn(viewModelScope)
 
         // Restore the persisted language override on a fresh launch. A value
@@ -295,13 +432,40 @@ class SentenceViewModel @Inject constructor(
                 appPrefs.languageOverride.first()?.let { setLanguageOverride(it) }
             }
         }
+
+        // Restore the persisted kanji-study-links toggle on a fresh launch
+        // (savedState wins on in-session process recreation).
+        if (savedState.get<Boolean>("linkToKanjiStudy") == null) {
+            viewModelScope.launch {
+                if (appPrefs.linkToKanjiStudy.first()) {
+                    _state.value = _state.value.copy(linkToKanjiStudy = true)
+                }
+            }
+        }
+
+        // Learn whether this install is a dev (bypass-listed) device.
+        viewModelScope.launch { budgetManager.refreshDevStatus() }
+
+        // Refresh purchase entitlements; a granted/restored boost lifts the
+        // local daily-limit block immediately.
+        billing.onEntitlementGranted = { budgetManager.clearLimit() }
+        billing.refresh()
+
+        // Show the "About" dialog the first time the app is ever launched.
+        if (savedState.get<Boolean>("infoShownThisProcess") != true) {
+            savedState["infoShownThisProcess"] = true
+            viewModelScope.launch {
+                if (!appPrefs.hasSeenInfo.first()) _showInfo.value = true
+            }
+        }
     }
 
     fun loadSentence(sentence: String) = acceptSharedSentence(sentence)
 
-    private fun acceptSharedSentence(sentence: String) {
+    private fun acceptSharedSentence(sentence: String, fromDeepLink: Boolean = false) {
         val text = sentence.trim()
         if (text.isBlank()) return
+        _cameFromDeepLink.value = fromDeepLink
         savedState["input"] = text
         val detected = LanguageDetector.detect(text)
         val effective = _state.value.languageOverride ?: detected
@@ -351,6 +515,7 @@ class SentenceViewModel @Inject constructor(
 
     fun onInputChange(value: String) {
         savedState["input"] = value
+        _cameFromDeepLink.value = false
         _state.value = _state.value.copy(input = value, isEditing = true)
         inputFlow.value = value
     }
@@ -394,17 +559,85 @@ class SentenceViewModel @Inject constructor(
                 }
             }.getOrElse { EntryLookup(loading = false, error = it.message) }
 
+            // Grouped idiom: look up each component word so the card can show
+            // them as sub-cards below the idiom (腹 / が / 立つ under 腹が立つ).
+            val componentEntries =
+                if (lang == Language.JAPANESE && token.isIdiomGroup) {
+                    token.components.map { comp ->
+                        val raw = runCatching { lookup(comp) }.getOrDefault(emptyList())
+                        // Prefer the homograph entry whose reading matches the
+                        // component's contextual reading (生 in 高校生 is せい,
+                        // not the more-common なま), so the right entry shows first.
+                        val ordered = raw.sortedByDescending {
+                            it.primaryReading == comp.dictionaryReading ||
+                                it.primaryReading == comp.reading
+                        }
+                        ComponentEntries(comp, ordered)
+                    }
+                } else emptyList()
+
             // Run for any entry with at least one sense: even single-meaning
             // words get a context-aware gloss (conjugation/grammar matters), the
-            // difference being there's no sense to "select".
+            // difference being there's no sense to "select". Both AI calls are
+            // gated on the privacy opt-out — when off, nothing leaves the device.
+            val aiOn = aiEnabled.value
             val ctxEntries = newLookup.entries
-            val ctxEligible = ctxEntries != null && ctxEntries.sumOf { it.senses.size } >= 1
+            val ctxEligible =
+                aiOn && ctxEntries != null && ctxEntries.sumOf { it.senses.size } >= 1
+
+            // In-expression meanings for the parts (idiom or decomposed
+            // compound), fetched once per expression — gated on the AI opt-out.
+            val partsEligible = aiOn && componentEntries.isNotEmpty()
 
             _state.value = _state.value.copy(
-                entries = _state.value.entries + (index to newLookup.copy(inContextLoading = ctxEligible)),
+                entries = _state.value.entries + (index to newLookup.copy(
+                    inContextLoading = ctxEligible,
+                    componentEntries = componentEntries,
+                    inExpressionLoading = partsEligible,
+                    compoundMeaningResult = if (newLookup.isFallbackSplit && !aiOn) {
+                        MeaningResult.AiDisabled
+                    } else {
+                        newLookup.compoundMeaningResult
+                    },
+                )),
             )
+
+            // Fetch the per-part in-expression meanings + matched sense (separate
+            // Haiku call, cached per expression). Send each part's displayed
+            // entry's senses so the model can pick which one to highlight.
+            if (partsEligible) {
+                launch {
+                    val partInputs = componentEntries.map { comp ->
+                        val senses = comp.entries.firstOrNull()?.senses?.map { s ->
+                            s.glosses.joinToString("; ") { it.text }
+                        } ?: emptyList()
+                        com.tangotori.app.data.context.PartInput(
+                            word = comp.token.dictionaryForm,
+                            reading = comp.token.dictionaryReading,
+                            senses = senses,
+                        )
+                    }
+                    val results = expressionParts.define(token.dictionaryForm, partInputs)
+                    val current = _state.value.entries[index] ?: return@launch
+                    val updated = if (results != null) {
+                        current.componentEntries.mapIndexed { ci, comp ->
+                            val r = results.getOrNull(ci)
+                            comp.copy(
+                                meaning = r?.meaning?.takeIf { it.isNotBlank() },
+                                senseIndex = r?.senseIndex,
+                            )
+                        }
+                    } else current.componentEntries
+                    _state.value = _state.value.copy(
+                        entries = _state.value.entries + (index to current.copy(
+                            componentEntries = updated,
+                            inExpressionLoading = false,
+                        )),
+                    )
+                }
+            }
             // Fetch compound meaning asynchronously after the card is visible.
-            if (newLookup.isFallbackSplit) {
+            if (newLookup.isFallbackSplit && aiOn) {
                 launch {
                     val result = compoundMeaningRepo.fetchMeaning(token.dictionaryForm, newLookup.subUnits)
                     val current = _state.value.entries[index] ?: return@launch
@@ -434,6 +667,9 @@ class SentenceViewModel @Inject constructor(
                         entries = _state.value.entries + (index to current.copy(
                             inContextLoading = false,
                             inContext = inCtx,
+                            inContextLimitReached =
+                                (result as? DisambiguationResult.LimitReached)
+                                    ?.showMessage == true,
                         )),
                     )
                 }
@@ -442,6 +678,7 @@ class SentenceViewModel @Inject constructor(
     }
 
     fun startEditing() {
+        _cameFromDeepLink.value = false
         _state.value = _state.value.copy(isEditing = true, selectedIndex = null)
     }
 
@@ -604,6 +841,7 @@ class SentenceViewModel @Inject constructor(
         val next = !_state.value.linkToKanjiStudy
         savedState["linkToKanjiStudy"] = next
         _state.value = _state.value.copy(linkToKanjiStudy = next)
+        viewModelScope.launch { appPrefs.setLinkToKanjiStudy(next) }
     }
 
     private fun isLinkableToken(t: Token): Boolean =

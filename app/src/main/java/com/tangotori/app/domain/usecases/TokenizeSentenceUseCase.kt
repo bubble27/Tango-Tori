@@ -6,7 +6,8 @@ import javax.inject.Inject
 
 class TokenizeSentenceUseCase @Inject constructor(
     private val tokenizer: SudachiTokenizer,
+    private val idiomGrouper: IdiomGrouper,
 ) {
     suspend operator fun invoke(sentence: String): List<Token> =
-        tokenizer.tokenize(sentence)
+        idiomGrouper.group(tokenizer.tokenize(sentence))
 }

@@ -66,13 +66,16 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
@@ -104,7 +107,13 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.text.LinkAnnotation
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLinkStyles
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.withLink
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -133,6 +142,8 @@ import com.tangotori.app.ui.theme.PosNoun
 import com.tangotori.app.ui.theme.PosVerb
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.expandVertically
@@ -140,12 +151,21 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.Image
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import com.tangotori.app.R
 import com.tangotori.app.ui.theme.LogoRed
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.foundation.layout.systemBarsPadding
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.text.input.ImeAction
 import kotlinx.coroutines.delay
@@ -156,6 +176,17 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.zIndex
 import androidx.compose.ui.layout.onSizeChanged
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
+
+/** Walks the context wrappers up to the hosting Activity (LocalContext may be
+ *  a ContextWrapper rather than the Activity itself). */
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -164,13 +195,27 @@ fun SentenceScreen(
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val recentSentences by viewModel.recentSentences.collectAsStateWithLifecycle()
+    val showInfo by viewModel.showInfo.collectAsStateWithLifecycle()
     val listState = rememberLazyListState()
     val snackbarHost = remember { SnackbarHostState() }
     val context = LocalContext.current
+    val cameFromDeepLink by viewModel.cameFromDeepLink.collectAsStateWithLifecycle()
 
-    // Back button returns to edit mode instead of exiting the app.
+    // Dismiss the keyboard once we leave editing for the result screen. This
+    // lets actions like "paste from clipboard" run first (tokenize → switch to
+    // viewing) with the keyboard still up, so the paste isn't visibly delayed
+    // behind a keyboard-down animation — the keyboard drops as the result appears.
+    val keyboardController = LocalSoftwareKeyboardController.current
+    LaunchedEffect(state.isEditing) {
+        if (!state.isEditing) keyboardController?.hide()
+    }
+
+    // Back from the dictionary view: normally return to edit mode, but if this
+    // sentence was opened from the Anki "Open in Tango Tori" deep link, finish
+    // the activity instead so the user returns to AnkiDroid (the launcher).
     BackHandler(enabled = !state.isEditing) {
-        viewModel.startEditing()
+        if (cameFromDeepLink) context.findActivity()?.finish()
+        else viewModel.startEditing()
     }
 
     // Permission flow for AnkiDroid's READ_WRITE_DATABASE — needed both for
@@ -238,6 +283,17 @@ fun SentenceScreen(
         viewModel.onTokenSelected(absIdx)
     }
 
+    // Lets the daily-limit notice (rendered deep inside the word cards) open
+    // the usage-limits screen without threading a callback down six levels.
+    val showUsageInfo by viewModel.showUsageInfo.collectAsStateWithLifecycle()
+    androidx.compose.runtime.CompositionLocalProvider(
+        LocalOpenUsageInfo provides viewModel::openUsageInfo,
+    ) {
+    // The full-screen About / usage overlays render here as siblings of the
+    // Scaffold (NOT as Dialogs): a Compose Dialog doesn't reliably dispatch
+    // WindowInsets, so systemBarsPadding read 0 and the scroll bottom ran under
+    // the nav bar. In the main window the insets are correct.
+    Box(Modifier.fillMaxSize()) {
     Scaffold(
         // No top bar — the parchment surface runs edge to edge for a quieter
         // dictionary feel. Status bar is restyled in themes.xml to match.
@@ -284,6 +340,7 @@ fun SentenceScreen(
                     onPasteSentence = viewModel::loadSentence,
                     onSetLanguage = viewModel::setLanguageOverride,
                     onHistoryTap = viewModel::loadSentence,
+                    onShowInfo = viewModel::openInfo,
                 )
             } else {
                 // Fresh subtree per sentence so no part of the previous view's
@@ -309,6 +366,44 @@ fun SentenceScreen(
             }
         }
     }
+
+    // Full-screen overlays slide up from the bottom (modal-sheet feel). The
+    // usage screen is drawn AFTER the About screen, so it stacks on top:
+    // opening it from About leaves About composed underneath, and dismissing
+    // usage returns there (X / back) rather than going all the way home.
+    AnimatedVisibility(
+        visible = showInfo,
+        enter = slideInVertically(tween(280)) { it } + fadeIn(tween(200)),
+        exit = slideOutVertically(tween(240)) { it } + fadeOut(tween(180)),
+    ) {
+        val isDevDevice by viewModel.isDevDevice.collectAsStateWithLifecycle()
+        val devModeEnabled by viewModel.devModeEnabled.collectAsStateWithLifecycle()
+        val aiEnabled by viewModel.aiEnabled.collectAsStateWithLifecycle()
+        AppInfoScreen(
+            onDismiss = viewModel::dismissInfo,
+            aiEnabled = aiEnabled,
+            onAiEnabledChange = viewModel::setAiEnabled,
+            showDevToggle = isDevDevice,
+            devModeEnabled = devModeEnabled,
+            onDevModeChange = viewModel::setDevMode,
+            // Open usage ON TOP of About (don't dismiss it) so dismissing usage
+            // returns to About instead of home.
+            onOpenUsageInfo = viewModel::openUsageInfo,
+        )
+    }
+
+    AnimatedVisibility(
+        visible = showUsageInfo,
+        enter = slideInVertically(tween(280)) { it } + fadeIn(tween(200)),
+        exit = slideOutVertically(tween(240)) { it } + fadeOut(tween(180)),
+    ) {
+        UsageLimitScreen(
+            viewModel = viewModel,
+            onDismiss = viewModel::dismissUsageInfo,
+        )
+    }
+    } // Box
+    } // CompositionLocalProvider
 
     state.deckPicker?.let { picker ->
         DeckPickerDialog(
@@ -360,6 +455,7 @@ private fun EditingLayout(
     onPasteSentence: (String) -> Unit,
     onSetLanguage: (Language?) -> Unit,
     onHistoryTap: (String) -> Unit,
+    onShowInfo: () -> Unit,
 ) {
     val focusManager = LocalFocusManager.current
     val focusRequester = remember { FocusRequester() }
@@ -482,12 +578,19 @@ private fun EditingLayout(
                     if (showPasteHint) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
+                            // Sits ABOVE the BasicTextField (a later sibling) so its
+                            // tap reaches this clickable instead of being eaten by
+                            // the field. Only shown while the field is empty, so it
+                            // never blocks typing.
                             modifier = Modifier
+                                .zIndex(1f)
                                 .clickable(
                                     interactionSource = remember { MutableInteractionSource() },
                                     indication = null,
                                 ) {
-                                    focusManager.clearFocus()
+                                    // Paste first; the keyboard is dismissed when
+                                    // the result screen appears (isEditing → false,
+                                    // see the LaunchedEffect in SentenceScreen).
                                     onPasteSentence(clipboardText)
                                 },
                         ) {
@@ -533,6 +636,21 @@ private fun EditingLayout(
             }
         }
 
+        // ── Info button (top-right). Fades out with the header during the exit.
+        IconButton(
+            onClick = onShowInfo,
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(top = 12.dp, end = 6.dp)
+                .graphicsLayer { alpha = headerAlpha },
+        ) {
+            Icon(
+                imageVector = Icons.Default.Info,
+                contentDescription = "About this app",
+                tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f),
+            )
+        }
+
         // ── Language tab bar — overlaid over the cards, anchored to the bottom.
         LanguageTabBar(
             selected = languageOverride,
@@ -542,6 +660,265 @@ private fun EditingLayout(
                 .fillMaxWidth()
                 .padding(start = 16.dp, end = 16.dp, bottom = 24.dp),
         )
+    }
+}
+
+private const val APP_PLAY_STORE_URL =
+    "https://play.google.com/store/apps/details?id=com.tangotori.app"
+private const val APP_GITHUB_URL = "https://github.com/bubble27/Tango-Tori"
+private const val APP_KOFI_URL = "https://ko-fi.com/bubble27"
+private const val APP_CONTACT_EMAIL = "alexdavydenko27@gmail.com"
+
+/** Full-screen "About this app" view opened from the home-screen info button.
+ *  Rendered as an in-window overlay (not a Dialog) so WindowInsets propagate
+ *  and the scroll clears the system bars. The Dev Mode toggle appears only on a
+ *  dev device (worker bypass list); ON = unmetered API usage, OFF = metered. */
+@Composable
+private fun AppInfoScreen(
+    onDismiss: () -> Unit,
+    aiEnabled: Boolean = true,
+    onAiEnabledChange: (Boolean) -> Unit = {},
+    showDevToggle: Boolean = false,
+    devModeEnabled: Boolean = true,
+    onDevModeChange: (Boolean) -> Unit = {},
+    onOpenUsageInfo: () -> Unit = {},
+) {
+    val linkStyle = SpanStyle(
+        color = MaterialTheme.colorScheme.primary,
+        textDecoration = TextDecoration.Underline,
+        fontWeight = FontWeight.Medium,
+    )
+    val styles = TextLinkStyles(style = linkStyle)
+    val bodyColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.88f)
+
+    BackHandler(onBack = onDismiss)
+    Surface(
+        // clickable swallows taps so they don't fall through to the dictionary
+        // behind this opaque full-screen overlay.
+        modifier = Modifier
+            .fillMaxSize()
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+            ) {},
+        color = MaterialTheme.colorScheme.background,
+    ) {
+        Column(modifier = Modifier.fillMaxSize().systemBarsPadding()) {
+            // Close button, top-right.
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(end = 8.dp, top = 4.dp),
+            ) {
+                Spacer(Modifier.weight(1f))
+                IconButton(onClick = onDismiss) {
+                    Icon(Icons.Default.Close, contentDescription = "Close")
+                }
+            }
+
+            // weight(1f), NOT fillMaxSize: as a Column child it must take the
+            // height REMAINING after the close row, or it overflows below the
+            // screen and the scroll bottom becomes unreachable.
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 24.dp)
+                    .padding(bottom = 40.dp),
+            ) {
+                    // ── Hero: bird + wordmark + tagline ──────────────────────
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Image(
+                            painter = painterResource(R.drawable.ic_bird_logo),
+                            contentDescription = null,
+                            modifier = Modifier.size(104.dp),
+                            contentScale = ContentScale.Fit,
+                        )
+                        Text(
+                            "Tango Tori",
+                            color = LogoRed,
+                            fontSize = 38.sp,
+                            fontWeight = FontWeight.Bold,
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            "The first sentence-based dictionary",
+                            fontSize = 14.sp,
+                            textAlign = TextAlign.Center,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                        )
+                    }
+                    Spacer(Modifier.height(20.dp))
+
+                    InfoSection("About") {
+                        Text(
+                            "Thank you for downloading Tango Tori!",
+                            fontSize = 19.sp,
+                            lineHeight = 25.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                        Spacer(Modifier.height(10.dp))
+                        InfoParagraph(
+                            "My name is Alex, and I'm a computer science student at the " +
+                                "University of Toronto. I built this app as a tool for my own " +
+                                "studies but then decided to release it since others might find " +
+                                "it useful too.",
+                            bodyColor,
+                        )
+                    }
+
+                    InfoSection("Open source") {
+                        InfoParagraph(bodyColor) {
+                            append("Tango Tori is entirely open source. You can find the code on ")
+                            withLink(LinkAnnotation.Url(APP_GITHUB_URL, styles)) { append("GitHub") }
+                            append(".")
+                        }
+                    }
+
+                    InfoSection("Support the app") {
+                        InfoParagraph(bodyColor) {
+                            append("If you'd like to support Tango Tori, the simplest way is to ")
+                            withLink(LinkAnnotation.Url(APP_PLAY_STORE_URL, styles)) {
+                                append("leave a review on the Play Store")
+                            }
+                            append(".")
+                        }
+                        Spacer(Modifier.height(10.dp))
+                        InfoParagraph(bodyColor) {
+                            append(
+                                "And if you're feeling extra generous and want to help cover the " +
+                                    "API costs the app runs on, you can donate to my ",
+                            )
+                            withLink(LinkAnnotation.Url(APP_KOFI_URL, styles)) { append("Ko-fi") }
+                            append(". Any amount is deeply appreciated!")
+                        }
+                    }
+
+                    InfoSection("Bugs & suggestions") {
+                        InfoParagraph(bodyColor) {
+                            append(
+                                "If you find any bugs or would like to suggest a feature, " +
+                                    "please send me an email at ",
+                            )
+                            withLink(LinkAnnotation.Url("mailto:$APP_CONTACT_EMAIL", styles)) {
+                                append(APP_CONTACT_EMAIL)
+                            }
+                            append(
+                                ". For bug reports, any screenshots and information regarding " +
+                                    "how you found it would be deeply appreciated. Thank you.",
+                            )
+                        }
+                    }
+
+                    InfoSection("AI features") {
+                        InfoParagraph(bodyColor) {
+                            append(
+                                "AI powers several features: glossing Chinese compound words, " +
+                                    "breaking Japanese idioms and compounds into their parts, " +
+                                    "and the in-context meaning of a word in your sentence. " +
+                                    "Most are free and unlimited; only the in-context meaning " +
+                                    "has a small daily limit. See the ",
+                            )
+                            withLink(
+                                LinkAnnotation.Clickable("usage_info") { onOpenUsageInfo() },
+                            ) {
+                                withStyle(linkStyle) { append("AI usage & limits") }
+                            }
+                            append(
+                                " page for details. You can also opt out of AI usage, which " +
+                                    "disables these features and keeps all data on this device.",
+                            )
+                        }
+                        Spacer(Modifier.height(12.dp))
+                        // Privacy opt-out: with AI features off the app never
+                        // contacts its backend, so looked-up text stays on-device.
+                        InfoToggleCard(
+                            title = "AI features",
+                            subtitle = if (aiEnabled) "On: sentences are sent for AI meanings"
+                                else "Off: everything stays on this device",
+                            checked = aiEnabled,
+                            onCheckedChange = onAiEnabledChange,
+                        )
+                    }
+
+                    if (showDevToggle) {
+                        InfoSection("Developer") {
+                            InfoToggleCard(
+                                title = "Dev mode",
+                                subtitle = if (devModeEnabled) "Unlimited API usage"
+                                    else "Metered like a free user",
+                                checked = devModeEnabled,
+                                onCheckedChange = onDevModeChange,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+}
+
+/** Section header ("##"-style) + its body, used by the About screen. */
+@Composable
+private fun InfoSection(title: String, content: @Composable () -> Unit) {
+    Text(
+        title.uppercase(),
+        fontSize = 12.sp,
+        fontWeight = FontWeight.Bold,
+        letterSpacing = 1.sp,
+        color = MaterialTheme.colorScheme.primary,
+        modifier = Modifier.padding(top = 22.dp, bottom = 8.dp),
+    )
+    content()
+}
+
+@Composable
+private fun InfoParagraph(text: String, color: Color) {
+    Text(text, fontSize = 14.sp, lineHeight = 21.sp, color = color)
+}
+
+@Composable
+private fun InfoParagraph(
+    color: Color,
+    builder: androidx.compose.ui.text.AnnotatedString.Builder.() -> Unit,
+) {
+    Text(buildAnnotatedString(builder), fontSize = 14.sp, lineHeight = 21.sp, color = color)
+}
+
+@Composable
+private fun InfoToggleCard(
+    title: String,
+    subtitle: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+) {
+    Card(
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+        ),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(start = 16.dp, end = 12.dp, top = 6.dp, bottom = 6.dp),
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    title,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                Text(
+                    subtitle,
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                )
+            }
+            Switch(checked = checked, onCheckedChange = onCheckedChange)
+        }
     }
 }
 

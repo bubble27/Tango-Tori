@@ -11,6 +11,8 @@
     <application
         android:name=".TangoToriApp"
         android:allowBackup="true"
+        android:fullBackupContent="@xml/backup_rules"
+        android:dataExtractionRules="@xml/data_extraction_rules"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
@@ -34,6 +36,15 @@
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="text/plain" />
+            </intent-filter>
+            <!-- Deep link from the "Open in Tango Tori" button on Anki cards:
+                 tangotori://sentence?text=<url-encoded sentence>. MainActivity
+                 reads the `text` query param and loads it as the sentence. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="tangotori" android:host="sentence" />
             </intent-filter>
         </activity>
     </application>

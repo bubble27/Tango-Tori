@@ -16,6 +16,7 @@ Anki JLPT/
 *.aab
 *.keystore
 *.jks
+keystore.properties
 
 # --- Claude Code workspace (per-user) ---
 .claude/

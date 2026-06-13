@@ -5,6 +5,7 @@ import android.util.Log
 import com.tangotori.app.domain.models.Token
 import com.tangotori.app.domain.util.KanjiKanaSplit
 import com.worksap.nlp.sudachi.DictionaryFactory
+import com.worksap.nlp.sudachi.Morpheme
 import com.worksap.nlp.sudachi.Tokenizer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
@@ -83,26 +84,39 @@ class SudachiTokenizer(
         return tokenizeMutex.withLock {
             withContext(Dispatchers.Default) {
                 val raw = tok.tokenize(Tokenizer.SplitMode.C, sentence).map { m ->
-                    val posList = m.partOfSpeech().toList()
-                    val surface = m.surface()
-                    val dictForm = m.dictionaryForm().ifEmpty { surface }
-                    val surfaceReading = m.readingForm().katakanaToHiragana()
-                    Token(
-                        surface = surface,
-                        dictionaryForm = dictForm,
-                        reading = surfaceReading,
-                        dictionaryReading = KanjiKanaSplit.deriveDictFormReading(
-                            surface = surface,
-                            surfaceReading = surfaceReading,
-                            dictForm = dictForm,
-                        ),
-                        partOfSpeech = PosMapper.classify(surface, posList),
-                        rawPosTag = posList.joinToString(","),
-                    )
+                    val base = morphemeToToken(m)
+                    // Decompose a compound (mode-C unit) into its shortest-unit
+                    // parts (mode A): 高校生 → [高校, 生]. Attach as components so
+                    // it renders as a compound with a per-part breakdown. Words
+                    // that don't split further (and conjugations, which are
+                    // already multiple mode-C morphemes) get no components.
+                    val subs = runCatching { m.split(Tokenizer.SplitMode.A) }.getOrNull()
+                    if (subs != null && subs.size >= 2) {
+                        base.copy(components = subs.map { morphemeToToken(it) })
+                    } else base
                 }
                 TokenMerger.merge(raw)
             }
         }
+    }
+
+    private fun morphemeToToken(m: Morpheme): Token {
+        val posList = m.partOfSpeech().toList()
+        val surface = m.surface()
+        val dictForm = m.dictionaryForm().ifEmpty { surface }
+        val surfaceReading = m.readingForm().katakanaToHiragana()
+        return Token(
+            surface = surface,
+            dictionaryForm = dictForm,
+            reading = surfaceReading,
+            dictionaryReading = KanjiKanaSplit.deriveDictFormReading(
+                surface = surface,
+                surfaceReading = surfaceReading,
+                dictForm = dictForm,
+            ),
+            partOfSpeech = PosMapper.classify(surface, posList),
+            rawPosTag = posList.joinToString(","),
+        )
     }
 
     private companion object { const val TAG = "SudachiTokenizer" }

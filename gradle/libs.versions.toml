@@ -19,6 +19,7 @@ sudachi = "0.7.5"
 jieba = "1.0.2"
 pinyin4j = "2.5.1"
 ankidroidApi = "api-v1.1.0"
+billing = "8.0.0"
 junit = "4.13.2"
 androidxJunit = "1.2.1"
 espresso = "3.6.1"
@@ -59,6 +60,7 @@ jieba = { group = "com.huaban", name = "jieba-analysis", version.ref = "jieba" }
 pinyin4j = { group = "com.belerweb", name = "pinyin4j", version.ref = "pinyin4j" }
 
 ankidroid-api = { group = "com.github.ankidroid", name = "Anki-Android", version.ref = "ankidroidApi" }
+billing-ktx = { group = "com.android.billingclient", name = "billing-ktx", version.ref = "billing" }
 
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 androidx-junit = { group = "androidx.test.ext", name = "junit", version.ref = "androidxJunit" }

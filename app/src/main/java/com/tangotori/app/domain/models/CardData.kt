@@ -19,6 +19,10 @@ data class CardData(
     /** Pre-rendered per-character breakdown HTML for the kanji in [word].
      *  Pass an empty string to omit the breakdown section from the card. */
     val kanjiBreakdownHtml: String = "",
+    /** `tangotori://` deep link that reopens this card's sentence in the app.
+     *  Pre-URL-encoded at build time (Anki templates can't URL-encode). Empty
+     *  string omits the "Open in Tango Tori" button. */
+    val openUrl: String = "",
 ) {
     fun toFieldArray(): Array<String> = arrayOf(
         word,
@@ -33,6 +37,7 @@ data class CardData(
         sentenceRaw,
         source,
         kanjiBreakdownHtml,
+        openUrl,
     )
 
     companion object {
@@ -49,11 +54,12 @@ data class CardData(
             "SentenceRaw",
             "Source",
             "KanjiBreakdown",
+            "OpenUrl",
         )
 
         // Bumped on field-set or template change so AnkiDroid creates a fresh
         // model instead of trying to reuse an incompatible older one.
-        const val NOTE_TYPE_NAME = "Tango Tori v5"
+        const val NOTE_TYPE_NAME = "Tango Tori v6"
     }
 }
 
