@@ -1,6 +1,6 @@
 # Tango Tori — Privacy Policy
 
-**Effective date: June 12, 2026**
+**Effective date: June 13, 2026**
 
 Tango Tori ("the app") is an open-source Japanese and Chinese dictionary and
 study tool developed by Alexander Davydenko ("I", "me"). This policy explains
@@ -21,16 +21,25 @@ if you make them, are always handled by Google Play itself.)
 
 ### 1. Sentences and words you look up
 
-When you use the AI-powered features (in-context meaning generation, and
-compound-word interpretation for Chinese), the sentence or word you entered is
-sent over HTTPS to the app's backend (a Cloudflare Worker operated by me),
-which forwards it to **Anthropic** (the AI provider) to generate the result.
+When you use the AI-powered features, the text you are looking up is sent over
+HTTPS to the app's backend (a Cloudflare Worker operated by me), which forwards
+it to **Anthropic** (the AI provider) to generate the result. The AI features
+are:
 
-- Sentences are cached on the backend so repeat lookups are faster and
-  cheaper, and are **automatically deleted after 7 days**.
-- Interpretations of individual Chinese compound words (vocabulary, with no
-  link to who looked them up) may be cached longer to keep the service fast
-  and affordable.
+- **In-context meaning** — the meaning of a word as used in your specific
+  sentence. Your **whole sentence** is sent for this one.
+- **Chinese compound glossing** — the meaning of a Chinese compound word the
+  dictionary didn't have. Only the **word** (and its parts) is sent.
+- **Idiom / compound parts** — the meanings of the component words of a
+  Japanese idiom or compound. Only the **expression and its parts** are sent.
+
+How this data is handled:
+
+- The vocabulary-based features (compound glossing, idiom/compound parts) send
+  only words — no sentence — and their results are cached and shared across all
+  users (they're the same for everyone), with no link to who looked them up.
+- **Sentences** (sent only for the in-context meaning) are cached on the backend
+  to speed up repeat lookups and are **automatically deleted after 7 days**.
 - Sentences are **not** linked to your device identifier or to you.
 - Anthropic processes this text as a service provider on my behalf and,
   per its API terms, does not use it to train its models.
